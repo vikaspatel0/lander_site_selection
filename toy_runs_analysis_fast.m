@@ -1,13 +1,18 @@
-clc; clear; close all;
+clc; clear; %close all;
 
 %strats = ["const_p10", "const_p20", "const_p30", "const_p40", "const_p50", "const_p60", "const_p70", "const_p80", "const_p90", "max_perc_beta0_5", "min_perc_beta0_5", "mean_perc_beta0_5", "prev_perc_beta0_5"];
-strats = ["const_p10_test0", "const_p20_test0", "const_p30_test0", "const_p40_test0", "const_p50_test0", "const_p60_test0", "const_p70_test0", "const_p80_test0", "const_p90_test0", "max_perc_beta0_5_test0", "min_perc_beta0_5_test0", "mean_perc_beta0_5_test0",...
-          "CVaR_alpha10_test0", "CVaR_alpha30_test0", "CVaR_alpha50_test0"];%, "thompson_test0"];
+%strats = ["const_p10_test0", "const_p20_test0", "const_p30_test0", "const_p40_test0", "const_p50_test0", "const_p60_test0", "const_p70_test0", "const_p80_test0", "const_p90_test0", "max_perc_beta0_5_test0", "min_perc_beta0_5_test0", "mean_perc_beta0_5_test0",...
+%          "CVaR_alpha10_test0", "CVaR_alpha30_test0", "CVaR_alpha50_test0"];%, "thompson_test0"];
+strats = [..."max_perc_beta0_5_test0", "min_perc_beta0_5_test0", ...
+          "CVaR_alpha10_test0", "CVaR_alpha30_test0", "CVaR_alpha50_test0"];
 %strats = ["const_p90", "const_p90_test", "const_p90_test0", "const_p90_test1", "mean_perc_beta0_5"];
 %strats_names = ["10^{th} %", "20^{th} %", "30^{th} %", "40^{th} %", "50^{th} %", "60^{th} %", "70^{th} %", "80^{th} %", "90^{th} %", "Max \sigma", "Min \sigma", "Mean \sigma", "Previous \sigma"];
-strats_names = ["10^{th} %0", "20^{th} %0", "30^{th} %0", "40^{th} %0", "50^{th} %0", "60^{th} %0", "70^{th} %0", "80^{th} %0", "90^{th} %0", "Max \sigma 0", "Min \sigma 0", "Mean \sigma 0",...
+%strats_names = ["10^{th} %0", "20^{th} %0", "30^{th} %0", "40^{th} %0", "50^{th} %0", "60^{th} %0", "70^{th} %0", "80^{th} %0", "90^{th} %0", "Max \sigma 0", "Min \sigma 0", "Mean \sigma 0",...
+%                "CVaR \alpha 10", "CVaR \alpha 30", "CVaR \alpha 50"];%, "Thompson"];
+strats_names = [..."Max \sigma 0", "Min \sigma 0",...
                 "CVaR \alpha 10", "CVaR \alpha 30", "CVaR \alpha 50"];%, "Thompson"];
 %strats_names = ["90^{th}", "90^{th} ts", "90^{th} ts0", "90^{th} ts1", "Mean \sigma"];
+
 reward_transition = ["k0", "k2", "k4", "k7", "k15"];
 reward_transition_names = ["k=0", "k=2", "k=4", "k=7", "k=15"];
 sigma = ["0_5", "1_0", "2_0", "3_0", "5_0"];
@@ -59,7 +64,7 @@ for i = strats
         for k = sigma
             idx = idx + 1;
 
-            filename = sprintf("data/batch_%s_%s_sigma%s.csv", i, j, k);
+            filename = sprintf("data_large/batch_%s_%s_sigma%s.csv", i, j, k);
             T = readtable(filename);
             v = T{:,8};
             v = v(:);
