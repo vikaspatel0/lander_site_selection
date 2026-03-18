@@ -33,8 +33,10 @@ function build_policy_list(;
     cone_angle::Float64,
     n_rollouts::Int = 200,
     budget::ActionBudget = DEFAULT_BUDGET,
+    planning_seed::Union{Nothing,Int} = nothing,
 )
     policies = Tuple{String, Function}[]
+    planner_seed = isnothing(planning_seed) ? rand(MersenneTwister(1), 1:10^9) : planning_seed
 
     # Helper for greedy-risk policies (most common pattern)
     function gr(name, rc; λe=0.0)
@@ -42,7 +44,7 @@ function build_policy_list(;
             plan_greedy_risk(img, ug, ns, ss, ca;
                 z_update=z_update, transition_k=transition_k,
                 risk_cfg=rc, λ_explore=λe,
-                ts_rng=MersenneTwister(rand(1:10^9)))))
+                ts_rng=MersenneTwister(planner_seed))))
     end
 
     # ═══════════════════════════════════════════════════════════════════
@@ -133,7 +135,7 @@ function build_policy_list(;
         plan_lucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=1.0, c=2.0)))
     push!(policies, ("Thompson (bandit)", (img, ug, ns, ss, ca) ->
         plan_thompson(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
-                      ts_rng=MersenneTwister(rand(1:10^9)))))
+                      ts_rng=MersenneTwister(planner_seed))))
 
     # ═══════════════════════════════════════════════════════════════════
     #  GROUP 4: MCTS planners (with time/memory budget)
@@ -142,31 +144,31 @@ function build_policy_list(;
     push!(policies, ("MCTS-rollout greedy", (img, ug, ns, ss, ca) ->
         plan_mcts_rollout(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                           n_rollouts=n_rollouts, rollout_policy=:greedy,
-                          sample_rng=MersenneTwister(rand(1:10^9)), budget=budget)))
+                          sample_rng=MersenneTwister(planner_seed), budget=budget)))
     push!(policies, ("MCTS-rollout ucb α=1", (img, ug, ns, ss, ca) ->
         plan_mcts_rollout(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                           n_rollouts=n_rollouts, rollout_policy=:ucb, rollout_alpha=1.0,
-                          sample_rng=MersenneTwister(rand(1:10^9)), budget=budget)))
+                          sample_rng=MersenneTwister(planner_seed), budget=budget)))
     push!(policies, ("MCTS-rollout coneinfo", (img, ug, ns, ss, ca) ->
         plan_mcts_rollout(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                           n_rollouts=n_rollouts, rollout_policy=:coneinfo, rollout_alpha=0.5,
-                          sample_rng=MersenneTwister(rand(1:10^9)), budget=budget)))
+                          sample_rng=MersenneTwister(planner_seed), budget=budget)))
     push!(policies, ("MCTS-tree random", (img, ug, ns, ss, ca) ->
         plan_mcts_tree(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                        mcts_cfg=MCTSTreeConfig(iterations=1500, exploration_c=1.4,
                                                 max_rollout_steps=2000, rollout_policy=:random),
-                       rng=MersenneTwister(rand(1:10^9)), budget=budget)))
+                       rng=MersenneTwister(planner_seed), budget=budget)))
     push!(policies, ("MCTS-tree greedy", (img, ug, ns, ss, ca) ->
         plan_mcts_tree(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                        mcts_cfg=MCTSTreeConfig(iterations=1500, exploration_c=1.4,
                                                 max_rollout_steps=2000, rollout_policy=:greedy),
-                       rng=MersenneTwister(rand(1:10^9)), budget=budget)))
+                       rng=MersenneTwister(planner_seed), budget=budget)))
     push!(policies, ("MCTS-tree ucb", (img, ug, ns, ss, ca) ->
         plan_mcts_tree(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                        mcts_cfg=MCTSTreeConfig(iterations=1500, exploration_c=1.4,
                                                 max_rollout_steps=2000, rollout_policy=:ucb,
                                                 rollout_alpha=1.0),
-                       rng=MersenneTwister(rand(1:10^9)), budget=budget)))
+                       rng=MersenneTwister(planner_seed), budget=budget)))
 
     return policies
 end
@@ -200,11 +202,19 @@ function run_comparison(;
     optimal_count = zeros(Int, n_policies)
 
     rng = MersenneTwister(seed)
+    rng_planning = MersenneTwister(seed + 2000)
 
     t0 = time()
     for sim in 1:n_sims
         terrain_seed = rand(rng, 1:10^9)
         noise_seed   = rand(rng, 1:10^9)
+        planning_seed = rand(rng_planning, 1:10^9)
+
+        policies_for_sim = build_policy_list(
+            z_update=z_update, transition_k=transition_k,
+            noise_sigma=noise_sigma, cone_angle=cone_angle,
+            n_rollouts=n_rollouts, budget=budget,
+            planning_seed=planning_seed)
 
         initial_mean_grid = generate_terrain_2(grid_size;
             seed=terrain_seed, value_min=terrain_value_min, value_range=terrain_value_range)
@@ -215,7 +225,7 @@ function run_comparison(;
         true_terrain = initial_mean_grid .+ update_grid
         optimal_value = maximum(true_terrain)
 
-        for (pi, (name, plan_fn)) in enumerate(policies)
+        for (pi, (name, plan_fn)) in enumerate(policies_for_sim)
             _, landing_value, _, _ = plan_fn(
                 initial_mean_grid, update_grid, noise_sigma,
                 start_state, cone_angle)

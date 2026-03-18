@@ -1,4 +1,4 @@
-using POMDPs
+﻿using POMDPs
 using POMDPTools
 using DiscreteValueIteration
 using Distributions
@@ -330,18 +330,18 @@ POMDPs.discount(::UncertainGridDescentMDP) = 1.0
 # =========================
 
 function generate_terrain_2(size::Int; seed=42, value_min=-10, value_range=20)
-    Random.seed!(seed)
+    rng = MersenneTwister(seed)
     x = range(0, 4π, length=size)
     y = range(0, 4π, length=size)
     terrain = zeros(size, size)
 
     # Randomize the coefficients and phase shifts for each layer
     for _ in 1:3 # Generate 3 random layers
-        coeff = 0.1 + 0.3 * rand()     # Random coefficient
-        freq_x = 1 + 3 * rand()        # Random frequency for x
-        freq_y = 1 + 3 * rand()        # Random frequency for y
-        phase_x = 2π * rand()          # Random phase shift for x
-        phase_y = 2π * rand()          # Random phase shift for y
+        coeff = 0.1 + 0.3 * rand(rng)     # Random coefficient
+        freq_x = 1 + 3 * rand(rng)        # Random frequency for x
+        freq_y = 1 + 3 * rand(rng)        # Random frequency for y
+        phase_x = 2π * rand(rng)          # Random phase shift for x
+        phase_y = 2π * rand(rng)          # Random phase shift for y
         
         for i in 1:size, j in 1:size
             terrain[i,j] += coeff * sin(freq_x * x[i] + phase_x) * cos(freq_y * y[j] + phase_y)
@@ -349,7 +349,7 @@ function generate_terrain_2(size::Int; seed=42, value_min=-10, value_range=20)
     end
     
     # Add final, smaller random noise
-    terrain .+= 0.05 * randn(size, size)
+    terrain .+= 0.05 * randn(rng, size, size)
 
     # Normalize the terrain to the desired range
     # (This part of your code was good, no changes needed here)
@@ -390,11 +390,11 @@ function update_weight(z::Int, z_update::Int, transition_k::Float64)
         ex  = exp(-transition_k * x)
         return (ex - ek) / (1 - ek)
     else
-        error("transition_k must be ≥ 0.")
+        error("transition_k must be â‰¥ 0.")
     end
 end
 
-function update_with_cone!(
+function update_with_cone_stochastic!(
     grid_std::Matrix{Float64},
     mean_grid::Matrix{Float64},
     initial_mean_grid::Matrix{Float64},
@@ -404,7 +404,8 @@ function update_with_cone!(
     noise_sigma::Float64,
     cone_angle::Float64,
     z_update::Int,
-    transition_k::Float64
+    transition_k::Float64,
+    rng::AbstractRNG
 )
     i_curr, j_curr = current_pos
     nrows, ncols = size(grid_std)
@@ -419,7 +420,8 @@ function update_with_cone!(
         if dist <= cone_radius
             if new_std < grid_std[i, j]
                 grid_std[i, j] = new_std
-                mean_grid[i, j] = initial_mean_grid[i, j] + w * update_grid[i, j]
+                alt_obsv_mean = initial_mean_grid[i, j] + w * update_grid[i, j]
+                mean_grid[i, j] = alt_obsv_mean + new_std * randn(rng)
             end
         end
     end
@@ -451,7 +453,7 @@ function step_next_state(nrows::Int, ncols::Int, s::Tuple{Int,Int,Int}, a::Symbo
     end
 end
 
-function plan_with_cone_sensing(
+function plan_with_cone_sensing_stochastic(
     initial_mean_grid::Matrix{Float64},
     update_grid::Matrix{Float64},
     noise_sigma::Float64,
@@ -461,6 +463,7 @@ function plan_with_cone_sensing(
     transition_k::Float64 = 0.0,
     risk_cfg::RiskConfig = RiskConfig(mode=RiskConstP, p_const=0.9),
     planner_cfg::PlannerConfig = PlannerConfig(mode=PlannerGreedyTarget),
+    measurement_rng::AbstractRNG = Random.default_rng(),
 )
     nrows, ncols = size(initial_mean_grid)
     mean_grid = copy(initial_mean_grid)
@@ -488,10 +491,10 @@ function plan_with_cone_sensing(
         reachable = reachable_indices_fast(nrows, ncols, i, j, z)
         
         # dynamics/sensing update (mutates belief)
-        update_with_cone!(
+        update_with_cone_stochastic!(
             grid_std, mean_grid, initial_mean_grid, update_grid,
             (i,j), z, noise_sigma, cone_angle,
-            z_update, transition_k
+            z_update, transition_k, measurement_rng
         )
 
         target = nothing
@@ -556,10 +559,10 @@ function plan_with_cone_sensing(
     end
 
     # final landing update at z=0
-    update_with_cone!(
+    update_with_cone_stochastic!(
         grid_std, mean_grid, initial_mean_grid, update_grid,
         (current_state[1], current_state[2]), 0, noise_sigma, cone_angle,
-        z_update, transition_k
+        z_update, transition_k, measurement_rng
     )
 
     return trajectory, total_reward, grid_std, mean_grid
@@ -591,6 +594,7 @@ function run_batch(
     planner_cfg::PlannerConfig = PlannerConfig(mode=PlannerGreedyTarget),
 )
     rng = MersenneTwister(seed)
+    rng_planning = MersenneTwister(seed + 2000) # Separate RNG for planning if needed
 
     header = ["run",
               "init_q25","init_med","init_q75",
@@ -603,6 +607,7 @@ function run_batch(
     for run in 1:n_sims
         terrain_seed = rand(rng, 1:10^9)
         noise_seed   = rand(rng, 1:10^9)
+        planning_seed = rand(rng_planning, 1:10^9)
 
         initial_mean_grid = generate_terrain_2(
             grid_size;
@@ -614,7 +619,7 @@ function run_batch(
         rng_noise = MersenneTwister(noise_seed)
         update_grid = noise_sigma .* randn(rng_noise, grid_size, grid_size)
 
-        traj, total_reward, final_std, final_mean_grid = plan_with_cone_sensing(
+        traj, total_reward, final_std, final_mean_grid = plan_with_cone_sensing_stochastic(
             initial_mean_grid,
             update_grid,
             noise_sigma,
@@ -623,7 +628,8 @@ function run_batch(
             z_update=z_update,
             transition_k=transition_k,
             risk_cfg=risk_cfg,
-            planner_cfg=planner_cfg
+            planner_cfg=planner_cfg,
+            measurement_rng = planning_seed
         )
 
         init_p = percentiles(vec(initial_mean_grid))
@@ -805,5 +811,6 @@ end
 #run_batch(1000; seed=1234, transition_k=15.0, noise_sigma=2.0, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_thompson_test0_k15_sigma2_0.csv", risk_cfg=RiskConfig(mode=Thompson), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget))
 #run_batch(1000; seed=1234, transition_k=15.0, noise_sigma=3.0, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_thompson_test0_k15_sigma3_0.csv", risk_cfg=RiskConfig(mode=Thompson), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget))
 #run_batch(1000; seed=1234, transition_k=15.0, noise_sigma=5.0, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_thompson_test0_k15_sigma5_0.csv", risk_cfg=RiskConfig(mode=Thompson), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget))
+
 
 

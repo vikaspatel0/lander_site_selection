@@ -537,6 +537,7 @@ function choose_action_tail_lookahead(
 
         # Simulate next observation / belief update
         mean_next = copy(snap.mean_grid)
+        mean_curr = copy(snap.mean_grid)
         std_next = copy(snap.std_grid)
 
         if cfg.simulate_next_observation
@@ -552,10 +553,11 @@ function choose_action_tail_lookahead(
                 z_update,
                 transition_k
             )
+
         end
 
         collective_score, target, tail_mean, best_score, entropy_after = collective_tail_metrics(
-            mean_next,
+            mean_curr,
             std_next,
             (ip, jp),
             zp,
@@ -879,19 +881,19 @@ end
 using Printf
 using Dates
 
-function sweep_tail_lookahead_1000(; base_seed=1234, out_dir="data_large")
-    #mkpath(out_dir)
+function sweep_tail_lookahead_1000(; base_seed=1234, out_dir="data_lookahead")
+    mkpath(out_dir)
 
     # ----- sweep axes (edit these) -----
     transition_ks = [0.0, 2.0, 4.0, 7.0, 15.0]
     sigmas = [0.5, 1.0, 2.0, 3.0, 5.0]
-    #tail_fracs = [0.05, 0.10, 0.20]
+    #tail_fracs = [0.10]
     tail_fracs = [0.10]
-    lambda_tails = [.025]#[.015, 0.025, 0.05, 0.075, 0.125, 0.25]
-    lambda_bests = [0.5, 1.00, 1.5]
-    lambda_travels = [0.01]
+    lambda_tails = [0.02]
+    lambda_bests = [1.00]
+    lambda_travels = [0.05]
     #lambda_entropies = [0.0, 0.1, 0.5]
-    lambda_entropies = [0.1]
+    lambda_entropies = [0.05]
     restricts = [true]                              # usually keep true for speed
     simulate_obs = [true]                           # usually true for your intent
 
@@ -922,7 +924,7 @@ function sweep_tail_lookahead_1000(; base_seed=1234, out_dir="data_large")
 
         run_id += 1
 
-        risk_cfg = RiskConfig(mode=RiskEntropicSigma, beta=beta, sigma_ref_mode=srm)
+        risk_cfg = RiskConfig(mode=RiskEntropicSigma, beta = beta)
 
         tail_cfg = TailLookaheadConfig(
             tail_fraction=tail_fraction,
@@ -941,9 +943,17 @@ function sweep_tail_lookahead_1000(; base_seed=1234, out_dir="data_large")
         sigma_name = replace(@sprintf("%.1f", noise_sigma), "." => "_")
         k_name = Int(round(transition_k))
         out_csv = joinpath(out_dir, @sprintf(
-            "batch_TL_lbest%s_k%d_sigma%s.csv",
+            "batch_TL_cell_wise_lbest%s_k%d_sigma%s.csv",
             lbest_name, k_name, sigma_name
         ))
+
+        # srm_name = replace(string(srm), "." => "_")
+        # out_csv = joinpath(out_dir, @sprintf(
+        #     "batch_TL_k%.1f_sigma%.3f_beta%.2f_tail%.2f_ltail%.3f_lbest%.2f_ltrav%.3f_lent%.3f_rr%d_sim%d_srm%s_seed%d.csv",
+        #     transition_k, noise_sigma, beta, tail_fraction, lambda_tail, lambda_best,
+        #     lambda_travel, lambda_entropy, Int(restrict_reachable), Int(sim_next_obs),
+        #     srm_name, base_seed
+        # ))
 
         @printf("[%d] writing %s\n", run_id, out_csv)
 

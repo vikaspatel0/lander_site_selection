@@ -29,33 +29,43 @@ const ACTIONS = [:up, :down, :left, :right, :none]
 #  Terrain generation
 # ─────────────────────────────────────────────────────────────────────
 
-function generate_terrain_2(sz::Int; seed=42, value_min=-10, value_range=20)
-    Random.seed!(seed)
-    x = range(0, 4π, length=sz)
-    y = range(0, 4π, length=sz)
-    terrain = zeros(sz, sz)
+function generate_terrain_2(size::Int; seed=42, value_min=-10, value_range=20)
+    rng = MersenneTwister(seed)
+    x = range(0, 4π, length=size)
+    y = range(0, 4π, length=size)
+    terrain = zeros(size, size)
 
-    for _ in 1:3
-        coeff = 0.1 + 0.3 * rand()
-        freq_x = 1 + 3 * rand()
-        freq_y = 1 + 3 * rand()
-        phase_x = 2π * rand()
-        phase_y = 2π * rand()
-        for i in 1:sz, j in 1:sz
+    # Randomize the coefficients and phase shifts for each layer
+    for _ in 1:3 # Generate 3 random layers
+        coeff = 0.1 + 0.3 * rand(rng)     # Random coefficient
+        freq_x = 1 + 3 * rand(rng)        # Random frequency for x
+        freq_y = 1 + 3 * rand(rng)        # Random frequency for y
+        phase_x = 2π * rand(rng)          # Random phase shift for x
+        phase_y = 2π * rand(rng)          # Random phase shift for y
+        
+        for i in 1:size, j in 1:size
             terrain[i,j] += coeff * sin(freq_x * x[i] + phase_x) * cos(freq_y * y[j] + phase_y)
         end
     end
+    
+    # Add final, smaller random noise
+    terrain .+= 0.05 * randn(rng, size, size)
 
-    terrain .+= 0.05 * randn(sz, sz)
-
+    # Normalize the terrain to the desired range
+    # (This part of your code was good, no changes needed here)
     curr_min = minimum(terrain)
     curr_max = maximum(terrain)
     curr_range = curr_max - curr_min
+
+    # Avoid division by zero if terrain is flat
     if curr_range > 0
+        scale_factor = value_range / curr_range
         terrain .-= curr_min
-        terrain .*= value_range / curr_range
+        terrain .*= scale_factor
     end
+    
     terrain .+= value_min
+    
     return terrain
 end
 
@@ -163,6 +173,45 @@ function update_with_cone!(
             if new_std < grid_std[i, j]
                 grid_std[i, j] = new_std
                 mean_grid[i, j] = initial_mean_grid[i, j] + w * update_grid[i, j]
+            end
+        end
+    end
+
+    if altitude == 0
+        grid_std[i_curr, j_curr] = 0.0
+        mean_grid[i_curr, j_curr] = initial_mean_grid[i_curr, j_curr] + update_grid[i_curr, j_curr]
+    end
+    return nothing
+end
+
+function update_with_cone_stochastic!(
+    grid_std::Matrix{Float64},
+    mean_grid::Matrix{Float64},
+    initial_mean_grid::Matrix{Float64},
+    update_grid::Matrix{Float64},
+    current_pos::Tuple{Int,Int},
+    altitude::Int,
+    noise_sigma::Float64,
+    cone_angle::Float64,
+    z_update::Int,
+    transition_k::Float64,
+    rng::AbstractRNG
+)
+    i_curr, j_curr = current_pos
+    nrows, ncols = size(grid_std)
+
+    w = update_weight(altitude, z_update, transition_k)
+    cone_radius = altitude * tan(cone_angle)
+
+    new_std = max(noise_sigma * (1.0-w), 0.0)
+
+    for i in 1:nrows, j in 1:ncols
+        dist = sqrt((i - i_curr)^2 + (j - j_curr)^2)
+        if dist <= cone_radius
+            if new_std < grid_std[i, j]
+                grid_std[i, j] = new_std
+                alt_obsv_mean = initial_mean_grid[i, j] + w * update_grid[i, j]
+                mean_grid[i, j] = alt_obsv_mean + new_std * randn(rng)
             end
         end
     end

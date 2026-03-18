@@ -23,6 +23,7 @@ end
     SigmaMax
     SigmaMean
     SigmaMin
+    Cellwise
 end
 
 # =========================
@@ -147,9 +148,12 @@ function compute_risk_sensitive_value(
         if rc.mode == RiskConstP
             p = rc.p_const
         elseif rc.mode == RiskEntropicSigma
-            # Use the precomputed reachable indices
-            sigma_ref = select_sigma_ref(grid_std, reachable, rc.sigma_ref_mode)
-            p = entropic_percentile(rc.beta, sigma_ref)
+            if rc.sigma_ref_mode == Cellwise
+                p = entropic_percentile(rc.beta, cell_std) # <-- Simpler version using only the cell's std
+            else
+                sigma_ref = select_sigma_ref(grid_std, reachable, rc.sigma_ref_mode)
+                p = entropic_percentile(rc.beta, sigma_ref)
+            end
         else
             error("Unknown RiskMode")
         end
