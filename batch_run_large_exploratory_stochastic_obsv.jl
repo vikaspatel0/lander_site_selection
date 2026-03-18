@@ -330,18 +330,18 @@ POMDPs.discount(::UncertainGridDescentMDP) = 1.0
 # =========================
 
 function generate_terrain_2(size::Int; seed=42, value_min=-10, value_range=20)
-    rng = MersenneTwister(seed)
+    Random.seed!(seed)
     x = range(0, 4π, length=size)
     y = range(0, 4π, length=size)
     terrain = zeros(size, size)
 
     # Randomize the coefficients and phase shifts for each layer
     for _ in 1:3 # Generate 3 random layers
-        coeff = 0.1 + 0.3 * rand(rng)     # Random coefficient
-        freq_x = 1 + 3 * rand(rng)        # Random frequency for x
-        freq_y = 1 + 3 * rand(rng)        # Random frequency for y
-        phase_x = 2π * rand(rng)          # Random phase shift for x
-        phase_y = 2π * rand(rng)          # Random phase shift for y
+        coeff = 0.1 + 0.3 * rand()     # Random coefficient
+        freq_x = 1 + 3 * rand()        # Random frequency for x
+        freq_y = 1 + 3 * rand()        # Random frequency for y
+        phase_x = 2π * rand()          # Random phase shift for x
+        phase_y = 2π * rand()          # Random phase shift for y
         
         for i in 1:size, j in 1:size
             terrain[i,j] += coeff * sin(freq_x * x[i] + phase_x) * cos(freq_y * y[j] + phase_y)
@@ -349,7 +349,7 @@ function generate_terrain_2(size::Int; seed=42, value_min=-10, value_range=20)
     end
     
     # Add final, smaller random noise
-    terrain .+= 0.05 * randn(rng, size, size)
+    terrain .+= 0.05 * randn(size, size)
 
     # Normalize the terrain to the desired range
     # (This part of your code was good, no changes needed here)
@@ -629,7 +629,7 @@ function run_batch(
             transition_k=transition_k,
             risk_cfg=risk_cfg,
             planner_cfg=planner_cfg,
-            measurement_rng = planning_seed
+            measurement_rng = MersenneTwister(planning_seed)
         )
 
         init_p = percentiles(vec(initial_mean_grid))
@@ -718,23 +718,24 @@ EVaR_alphas_test_names = ["1", "5", "10", "20"]
 for (k, k_name) in zip(transition_ks, transition_k_names)
     println("Starting transition strategy: k=$k_name")
     for (sigma, sigma_name) in zip(sigmas, sigma_names)
-        #println("  Testing noise sigma: $sigma")
-        #for (strat, name) in zip(sigma_strats_test, sigma_strats_test_names)
-        #    println("Starting percentile strategy: $name")
-        #    run_batch(1000; seed=1234, transition_k=k, noise_sigma=sigma, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_$(name)_perc_k$(k_name)_sigma$(sigma_name).csv", risk_cfg=RiskConfig(mode=RiskEntropicSigma, beta=0.5, sigma_ref_mode=strat), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget, greedy=GreedyTargetConfig(lambda_explore=0.0)))
-        #    run_batch(1000; seed=1234, transition_k=k, noise_sigma=sigma, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_$(name)_perc_expl_k$(k_name)_sigma$(sigma_name).csv", risk_cfg=RiskConfig(mode=RiskEntropicSigma, beta=0.5, sigma_ref_mode=strat), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget, greedy=GreedyTargetConfig(lambda_explore=0.1)))
-        #end
-        #println("  Testing CVaR strategy")
-        #for (alpha_test, alpha_name) in zip(CVar_alphas_test, CVar_alphas_test_names)
-        #    println("Starting CVaR alpha: $alpha_test")
-        #    run_batch(1000; seed=1234, transition_k=k, noise_sigma=sigma, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_CVaR_alpha$(alpha_name)_k$(k_name)_sigma$(sigma_name).csv", risk_cfg=RiskConfig(mode=RiskCVaR, alpha=alpha_test), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget, greedy=GreedyTargetConfig(lambda_explore=0.0)))
-        #    run_batch(1000; seed=1234, transition_k=k, noise_sigma=sigma, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_CVaR_alpha$(alpha_name)_expl_k$(k_name)_sigma$(sigma_name).csv", risk_cfg=RiskConfig(mode=RiskCVaR, alpha=alpha_test), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget, greedy=GreedyTargetConfig(lambda_explore=0.1)))
-        #end
+        println("  Testing noise sigma: $sigma")
+        println("  Testing CVaR strategy")
+        for (alpha_test, alpha_name) in zip(CVar_alphas_test, CVar_alphas_test_names)
+            println("Starting CVaR alpha: $alpha_test")
+            run_batch(1000; seed=1234, transition_k=k, noise_sigma=sigma, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_stochastic_CVaR_alpha$(alpha_name)_k$(k_name)_sigma$(sigma_name).csv", risk_cfg=RiskConfig(mode=RiskCVaR, alpha=alpha_test), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget, greedy=GreedyTargetConfig(lambda_explore=0.0)))
+            run_batch(1000; seed=1234, transition_k=k, noise_sigma=sigma, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_stochastic_CVaR_alpha$(alpha_name)_expl_k$(k_name)_sigma$(sigma_name).csv", risk_cfg=RiskConfig(mode=RiskCVaR, alpha=alpha_test), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget, greedy=GreedyTargetConfig(lambda_explore=0.1)))
+        end
+        println("  Testing percentile strategies")
+        for (strat, name) in zip(sigma_strats_test, sigma_strats_test_names)
+            println("Starting percentile strategy: $name")
+            run_batch(1000; seed=1234, transition_k=k, noise_sigma=sigma, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_stochastic_$(name)_perc_k$(k_name)_sigma$(sigma_name).csv", risk_cfg=RiskConfig(mode=RiskEntropicSigma, beta=0.5, sigma_ref_mode=strat), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget, greedy=GreedyTargetConfig(lambda_explore=0.0)))
+            run_batch(1000; seed=1234, transition_k=k, noise_sigma=sigma, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_stochastic_$(name)_perc_expl_k$(k_name)_sigma$(sigma_name).csv", risk_cfg=RiskConfig(mode=RiskEntropicSigma, beta=0.5, sigma_ref_mode=strat), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget, greedy=GreedyTargetConfig(lambda_explore=0.1)))
+        end
         println("  Testing EVaR strategy")
         for (alpha_test, alpha_name) in zip(EVaR_alphas_test, EVaR_alphas_test_names)
             println("Starting EVaR alpha: $alpha_test")
-            run_batch(1000; seed=1234, transition_k=k, noise_sigma=sigma, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_EVaR_alpha$(alpha_name)_k$(k_name)_sigma$(sigma_name).csv", risk_cfg=RiskConfig(mode=RiskEVaR, alpha=alpha_test), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget, greedy=GreedyTargetConfig(lambda_explore=0.0)))
-            run_batch(1000; seed=1234, transition_k=k, noise_sigma=sigma, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_EVaR_alpha$(alpha_name)_expl_k$(k_name)_sigma$(sigma_name).csv", risk_cfg=RiskConfig(mode=RiskEVaR, alpha=alpha_test), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget, greedy=GreedyTargetConfig(lambda_explore=0.1)))
+            run_batch(1000; seed=1234, transition_k=k, noise_sigma=sigma, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_stochastic_EVaR_alpha$(alpha_name)_k$(k_name)_sigma$(sigma_name).csv", risk_cfg=RiskConfig(mode=RiskEVaR, alpha=alpha_test), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget, greedy=GreedyTargetConfig(lambda_explore=0.0)))
+            run_batch(1000; seed=1234, transition_k=k, noise_sigma=sigma, terrain_value_min=0.0, terrain_value_range=10.0, z_update=24, out_csv="data_large/batch_stochastic_EVaR_alpha$(alpha_name)_expl_k$(k_name)_sigma$(sigma_name).csv", risk_cfg=RiskConfig(mode=RiskEVaR, alpha=alpha_test), planner_cfg=PlannerConfig(mode=PlannerGreedyTarget, greedy=GreedyTargetConfig(lambda_explore=0.1)))
         end
     end
 end

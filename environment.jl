@@ -30,18 +30,18 @@ const ACTIONS = [:up, :down, :left, :right, :none]
 # ─────────────────────────────────────────────────────────────────────
 
 function generate_terrain_2(size::Int; seed=42, value_min=-10, value_range=20)
-    rng = MersenneTwister(seed)
+    Random.seed!(seed)
     x = range(0, 4π, length=size)
     y = range(0, 4π, length=size)
     terrain = zeros(size, size)
 
     # Randomize the coefficients and phase shifts for each layer
     for _ in 1:3 # Generate 3 random layers
-        coeff = 0.1 + 0.3 * rand(rng)     # Random coefficient
-        freq_x = 1 + 3 * rand(rng)        # Random frequency for x
-        freq_y = 1 + 3 * rand(rng)        # Random frequency for y
-        phase_x = 2π * rand(rng)          # Random phase shift for x
-        phase_y = 2π * rand(rng)          # Random phase shift for y
+        coeff = 0.1 + 0.3 * rand()     # Random coefficient
+        freq_x = 1 + 3 * rand()        # Random frequency for x
+        freq_y = 1 + 3 * rand()        # Random frequency for y
+        phase_x = 2π * rand()          # Random phase shift for x
+        phase_y = 2π * rand()          # Random phase shift for y
         
         for i in 1:size, j in 1:size
             terrain[i,j] += coeff * sin(freq_x * x[i] + phase_x) * cos(freq_y * y[j] + phase_y)
@@ -49,7 +49,7 @@ function generate_terrain_2(size::Int; seed=42, value_min=-10, value_range=20)
     end
     
     # Add final, smaller random noise
-    terrain .+= 0.05 * randn(rng, size, size)
+    terrain .+= 0.05 * randn(size, size)
 
     # Normalize the terrain to the desired range
     # (This part of your code was good, no changes needed here)
