@@ -20,8 +20,10 @@ function plan_lucb(
     transition_k::Float64 = 0.0,
     α::Float64 = 1.0,
     c::Float64 = 2.0,   # elimination confidence width
+    obs_rng::AbstractRNG = MersenneTwister(0),
 )
     nrows, ncols = size(initial_mean_grid)
+    true_terrain = initial_mean_grid .+ update_grid
     mean_grid = copy(initial_mean_grid)
     grid_std  = fill(noise_sigma, nrows, ncols)
 
@@ -35,8 +37,8 @@ function plan_lucb(
     while current_state[3] > 0
         i, j, z = current_state
 
-        update_with_cone!(grid_std, mean_grid, initial_mean_grid, update_grid,
-                          (i, j), z, noise_sigma, cone_angle, z_update, transition_k)
+        observe_and_update!(mean_grid, grid_std, true_terrain, initial_mean_grid,
+                            (i, j), z, noise_sigma, cone_angle, z_update, transition_k, obs_rng)
 
         # Prune active set to currently reachable
         reachable = Set(reachable_indices(nrows, ncols, i, j, z))
@@ -83,8 +85,7 @@ function plan_lucb(
         next_state = step_next_state(nrows, ncols, current_state, action)
 
         r = if next_state[3] == 0
-            true_val = initial_mean_grid[next_state[1], next_state[2]] +
-                       update_grid[next_state[1], next_state[2]]
+            true_val = true_terrain[next_state[1], next_state[2]]
             true_val + action_penalty(action)
         else
             action_penalty(action)
@@ -100,6 +101,6 @@ function plan_lucb(
     end
 
     land_i, land_j, _ = trajectory[end].next_state
-    landing_value = initial_mean_grid[land_i, land_j] + update_grid[land_i, land_j]
+    landing_value = true_terrain[land_i, land_j]
     return trajectory, landing_value, grid_std, mean_grid
 end

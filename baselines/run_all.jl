@@ -5,8 +5,7 @@
 #    Mean, SE, Entropic, CVaR10, Q05, Min, %Opt
 #  with paired t-tests vs a chosen reference policy.
 #
-#  Includes all greedy-risk variants from the original batch_run files,
-#  plus our new bandit/MCTS baselines.
+#  Includes greedy-risk, bandit, MCTS, and tail-lookahead baselines.
 # =====================================================================
 
 # Include shared environment from lander_site_selection root, then all baselines
@@ -20,10 +19,14 @@ include("mcts_rollout.jl")   # plan_mcts_rollout
 include("mcts_tree.jl")      # plan_mcts_tree, MCTSTreeConfig
 include("tail_lookahead.jl") # plan_tail_lookahead, TailLookaheadConfig
 
+
 using Printf
 
 # ─────────────────────────────────────────────────────────────────────
 #  Policy registry
+#
+#  Each policy lambda now takes 6 args: (img, ug, ns, ss, ca, obs_rng)
+#  where obs_rng is the RNG for stochastic sensor observations.
 # ─────────────────────────────────────────────────────────────────────
 
 function build_policy_list(;
@@ -40,57 +43,55 @@ function build_policy_list(;
 
     # Helper for greedy-risk policies (most common pattern)
     function gr(name, rc; λe=0.0)
-        push!(policies, (name, (img, ug, ns, ss, ca) ->
+        push!(policies, (name, (img, ug, ns, ss, ca, obs_rng) ->
             plan_greedy_risk(img, ug, ns, ss, ca;
                 z_update=z_update, transition_k=transition_k,
                 risk_cfg=rc, λ_explore=λe,
-                ts_rng=MersenneTwister(planner_seed))))
+                ts_rng=MersenneTwister(planner_seed),
+                obs_rng=obs_rng)))
     end
 
     # ═══════════════════════════════════════════════════════════════════
-    #  GROUP 1: Greedy-risk baselines (from batch_run_large files)
+    #  GROUP 1: Greedy-risk baselines
     # ═══════════════════════════════════════════════════════════════════
 
-    # --- Entropic-sigma with different σ_ref modes (batch_run_large.jl) ---
+    # --- Entropic-sigma with different σ_ref modes ---
     gr("Max σ (β=0.5)",   RiskConfig(mode=RiskEntropicSigma, beta=0.5, sigma_ref_mode=SigmaMax))
     gr("Min σ (β=0.5)",   RiskConfig(mode=RiskEntropicSigma, beta=0.5, sigma_ref_mode=SigmaMin))
     gr("Mean σ (β=0.5)",  RiskConfig(mode=RiskEntropicSigma, beta=0.5, sigma_ref_mode=SigmaMean))
 
-    # --- CVaR with different tail fractions (batch_run_large.jl) ---
+    # --- CVaR with different tail fractions ---
     gr("CVaR α=0.10",     RiskConfig(mode=RiskCVaR, alpha=0.10))
     gr("CVaR α=0.30",     RiskConfig(mode=RiskCVaR, alpha=0.30))
     gr("CVaR α=0.50",     RiskConfig(mode=RiskCVaR, alpha=0.50))
 
-    # --- Entropic-sigma + exploration bonus (batch_run_large_exploratory.jl) ---
+    # --- Entropic-sigma + exploration bonus ---
     gr("Max σ + Expl",    RiskConfig(mode=RiskEntropicSigma, beta=0.5, sigma_ref_mode=SigmaMax); λe=0.1)
     gr("Min σ + Expl",    RiskConfig(mode=RiskEntropicSigma, beta=0.5, sigma_ref_mode=SigmaMin); λe=0.1)
 
-    # --- CVaR + exploration bonus (batch_run_large_exploratory.jl) ---
+    # --- CVaR + exploration bonus ---
     gr("CVaR α=0.10 +Expl", RiskConfig(mode=RiskCVaR, alpha=0.10); λe=0.1)
     gr("CVaR α=0.30 +Expl", RiskConfig(mode=RiskCVaR, alpha=0.30); λe=0.1)
     gr("CVaR α=0.50 +Expl", RiskConfig(mode=RiskCVaR, alpha=0.50); λe=0.1)
 
-    # --- EVaR (batch_run_large_exploratory.jl) ---
+    # --- EVaR ---
     gr("EVaR α=0.01",     RiskConfig(mode=RiskEVaR, alpha=0.01); λe=0.1)
     gr("EVaR α=0.10",     RiskConfig(mode=RiskEVaR, alpha=0.10); λe=0.1)
     gr("EVaR α=0.50",     RiskConfig(mode=RiskEVaR, alpha=0.50); λe=0.1)
 
-    # --- Cellwise entropic (batch_run_large_exploratory.jl) ---
+    # --- Cellwise entropic ---
     gr("Entropic cellwise", RiskConfig(mode=RiskEntropicSigma, beta=0.5, use_cellwise_sigma=true))
-
-    # --- ConstP ---
-    gr("ConstP p=0.9",    RiskConfig(mode=RiskConstP, p_const=0.9))
 
     # --- Thompson (greedy-risk variant) ---
     gr("Thompson (greedy)", RiskConfig(mode=RiskThompson))
 
     # ═══════════════════════════════════════════════════════════════════
-    #  GROUP 2: Tail lookahead (batch_run_large_tail_lookahead.jl)
+    #  GROUP 2: Tail lookahead
     # ═══════════════════════════════════════════════════════════════════
 
     for λb in [0.5, 1.0, 1.5]
         λb_str = @sprintf("%.1f", λb)
-        push!(policies, ("TL λb=$λb_str", (img, ug, ns, ss, ca) ->
+        push!(policies, ("TL λb=$λb_str", (img, ug, ns, ss, ca, obs_rng) ->
             plan_tail_lookahead(img, ug, ns, ss, ca;
                 z_update=z_update, transition_k=transition_k,
                 risk_cfg=TLRiskConfig(mode=TLRiskEntropicSigma, beta=0.5),
@@ -100,13 +101,14 @@ function build_policy_list(;
                     lambda_best=λb,
                     lambda_travel=0.01,
                     lambda_entropy=0.1,
-                    simulate_next_observation=true))))
+                    simulate_next_observation=true),
+                obs_rng=obs_rng)))
     end
 
     # TL with different tail fractions
     for tf in [0.50, 0.80]
         tf_str = @sprintf("%.0f%%", 100*tf)
-        push!(policies, ("TL $tf_str", (img, ug, ns, ss, ca) ->
+        push!(policies, ("TL $tf_str", (img, ug, ns, ss, ca, obs_rng) ->
             plan_tail_lookahead(img, ug, ns, ss, ca;
                 z_update=z_update, transition_k=transition_k,
                 risk_cfg=TLRiskConfig(mode=TLRiskEntropicSigma, beta=0.5),
@@ -116,59 +118,63 @@ function build_policy_list(;
                     lambda_best=1.0,
                     lambda_travel=0.01,
                     lambda_entropy=0.1,
-                    simulate_next_observation=true))))
+                    simulate_next_observation=true),
+                obs_rng=obs_rng)))
     end
 
     # ═══════════════════════════════════════════════════════════════════
     #  GROUP 3: Bandit-style target selection (our new baselines)
     # ═══════════════════════════════════════════════════════════════════
 
-    push!(policies, ("UCB α=0.5", (img, ug, ns, ss, ca) ->
-        plan_ucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=0.5)))
-    push!(policies, ("UCB α=1.0", (img, ug, ns, ss, ca) ->
-        plan_ucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=1.0)))
-    push!(policies, ("UCB α=2.0", (img, ug, ns, ss, ca) ->
-        plan_ucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=2.0)))
-    push!(policies, ("LCB α=1.0", (img, ug, ns, ss, ca) ->
-        plan_lcb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=1.0)))
-    push!(policies, ("LUCB α=1 c=2", (img, ug, ns, ss, ca) ->
-        plan_lucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=1.0, c=2.0)))
-    push!(policies, ("Thompson (bandit)", (img, ug, ns, ss, ca) ->
+    push!(policies, ("BayesUCB α=0.5", (img, ug, ns, ss, ca, obs_rng) ->
+        plan_ucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=0.5,
+                 obs_rng=obs_rng)))
+    push!(policies, ("BayesUCB α=1.0", (img, ug, ns, ss, ca, obs_rng) ->
+        plan_ucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=1.0,
+                 obs_rng=obs_rng)))
+    push!(policies, ("BayesLCB α=1.0", (img, ug, ns, ss, ca, obs_rng) ->
+        plan_lcb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=1.0,
+                 obs_rng=obs_rng)))
+    push!(policies, ("BayesLUCB α=1 c=2", (img, ug, ns, ss, ca, obs_rng) ->
+        plan_lucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=1.0, c=2.0,
+                  obs_rng=obs_rng)))
+    push!(policies, ("Thompson (bandit)", (img, ug, ns, ss, ca, obs_rng) ->
         plan_thompson(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
-                      ts_rng=MersenneTwister(planner_seed))))
+                      ts_rng=MersenneTwister(planner_seed),
+                      obs_rng=obs_rng)))
 
     # ═══════════════════════════════════════════════════════════════════
     #  GROUP 4: MCTS planners (with time/memory budget)
     # ═══════════════════════════════════════════════════════════════════
 
-    push!(policies, ("MCTS-rollout greedy", (img, ug, ns, ss, ca) ->
+    push!(policies, ("MCTS-rollout greedy", (img, ug, ns, ss, ca, obs_rng) ->
         plan_mcts_rollout(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                           n_rollouts=n_rollouts, rollout_policy=:greedy,
-                          sample_rng=MersenneTwister(planner_seed), budget=budget)))
-    push!(policies, ("MCTS-rollout ucb α=1", (img, ug, ns, ss, ca) ->
+                          sample_rng=MersenneTwister(planner_seed),
+                          obs_rng=obs_rng, budget=budget)))
+    push!(policies, ("MCTS-rollout ucb α=1", (img, ug, ns, ss, ca, obs_rng) ->
         plan_mcts_rollout(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                           n_rollouts=n_rollouts, rollout_policy=:ucb, rollout_alpha=1.0,
-                          sample_rng=MersenneTwister(planner_seed), budget=budget)))
-    push!(policies, ("MCTS-rollout coneinfo", (img, ug, ns, ss, ca) ->
+                          sample_rng=MersenneTwister(planner_seed),
+                          obs_rng=obs_rng, budget=budget)))
+    push!(policies, ("MCTS-rollout coneinfo", (img, ug, ns, ss, ca, obs_rng) ->
         plan_mcts_rollout(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                           n_rollouts=n_rollouts, rollout_policy=:coneinfo, rollout_alpha=0.5,
-                          sample_rng=MersenneTwister(planner_seed), budget=budget)))
-    push!(policies, ("MCTS-tree random", (img, ug, ns, ss, ca) ->
-        plan_mcts_tree(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
-                       mcts_cfg=MCTSTreeConfig(iterations=1500, exploration_c=1.4,
-                                                max_rollout_steps=2000, rollout_policy=:random),
-                       rng=MersenneTwister(planner_seed), budget=budget)))
-    push!(policies, ("MCTS-tree greedy", (img, ug, ns, ss, ca) ->
+                          sample_rng=MersenneTwister(planner_seed),
+                          obs_rng=obs_rng, budget=budget)))
+    push!(policies, ("MCTS-tree greedy", (img, ug, ns, ss, ca, obs_rng) ->
         plan_mcts_tree(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                        mcts_cfg=MCTSTreeConfig(iterations=1500, exploration_c=1.4,
                                                 max_rollout_steps=2000, rollout_policy=:greedy),
-                       rng=MersenneTwister(planner_seed), budget=budget)))
-    push!(policies, ("MCTS-tree ucb", (img, ug, ns, ss, ca) ->
+                       rng=MersenneTwister(planner_seed),
+                       obs_rng=obs_rng, budget=budget)))
+    push!(policies, ("MCTS-tree ucb", (img, ug, ns, ss, ca, obs_rng) ->
         plan_mcts_tree(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                        mcts_cfg=MCTSTreeConfig(iterations=1500, exploration_c=1.4,
                                                 max_rollout_steps=2000, rollout_policy=:ucb,
                                                 rollout_alpha=1.0),
-                       rng=MersenneTwister(planner_seed), budget=budget)))
+                       rng=MersenneTwister(planner_seed),
+                       obs_rng=obs_rng, budget=budget)))
 
     return policies
 end
@@ -191,7 +197,13 @@ function run_comparison(;
     n_rollouts::Int = 200,
     budget::ActionBudget = DEFAULT_BUDGET,
     reference_policy::String = "MCTS-rollout greedy",
+    update_mode::Symbol = :altitude_weighted,
+    decay_lambda::Float64 = 0.6,
 )
+    # Set global update mode so all observe_and_update! calls use it
+    global GLOBAL_UPDATE_MODE = update_mode
+    global GLOBAL_DECAY_LAMBDA = decay_lambda
+
     policies = build_policy_list(
         z_update=z_update, transition_k=transition_k,
         noise_sigma=noise_sigma, cone_angle=cone_angle,
@@ -226,9 +238,12 @@ function run_comparison(;
         optimal_value = maximum(true_terrain)
 
         for (pi, (name, plan_fn)) in enumerate(policies_for_sim)
+            # Use planning_seed for obs_rng so all policies see the same observation noise
+            obs_rng = MersenneTwister(planning_seed)
+
             _, landing_value, _, _ = plan_fn(
                 initial_mean_grid, update_grid, noise_sigma,
-                start_state, cone_angle)
+                start_state, cone_angle, obs_rng)
 
             push!(results[pi], landing_value)
             if abs(landing_value - optimal_value) < 1e-10
@@ -252,7 +267,7 @@ function run_comparison(;
     println("="^95)
 
     @printf("\n  %-25s %10s %8s %8s %8s %8s %7s\n",
-            "Policy", "Mean ± SE", "Entrop", "CVaR10", "Q05", "Min", "%Opt")
+            "Policy", "Mean ± SE", "Entrop", "P05", "P10", "Min", "%Opt")
     println("  ", "─"^82)
 
     for (pi, (name, _)) in enumerate(policies)
@@ -260,15 +275,13 @@ function run_comparison(;
         m = mean(vals)
         se = std(vals) / sqrt(length(vals))
         ent = -(1.0 / beta) * log(mean(exp.(-beta .* vals)) + eps())
-        sorted = sort(vals)
-        n10 = max(1, ceil(Int, 0.10 * length(vals)))
-        cvar = mean(sorted[1:n10])
-        q05 = length(vals) >= 20 ? quantile(vals, 0.05) : minimum(vals)
+        p05 = length(vals) >= 20 ? quantile(vals, 0.05) : minimum(vals)
+        p10 = length(vals) >= 10 ? quantile(vals, 0.10) : minimum(vals)
         mn = minimum(vals)
         popt = 100.0 * optimal_count[pi] / n_sims
 
         @printf("  %-25s %6.2f±%4.2f %8.2f %8.2f %8.2f %8.2f %6.1f%%\n",
-                name, m, se, ent, cvar, q05, mn, popt)
+                name, m, se, ent, p05, p10, mn, popt)
     end
 
     # ── Paired t-tests vs reference ──
@@ -296,11 +309,11 @@ function run_comparison(;
 end
 
 # ─────────────────────────────────────────────────────────────────────
-#  Run (batch_run_large defaults, 10 sims for testing)
+#  Default run
 # ─────────────────────────────────────────────────────────────────────
 
 run_comparison(
-    n_sims = 10,
+    n_sims = 20,
     seed = 1234,
     grid_size = 60,
     start_state = (20, 36, 30),
@@ -312,4 +325,6 @@ run_comparison(
     transition_k = 0.0,
     n_rollouts = 200,
     budget = ActionBudget(time_limit_s=30.0, memory_limit_bytes=256*1024*1024),
+    update_mode = :altitude_weighted,
+    decay_lambda = 0.6,
 )

@@ -1,9 +1,8 @@
 # =====================================================================
 #  Greedy Target with Risk-Sensitive Reward
 #
-#  Unified baseline covering all risk configurations from the batch_run
-#  files. The planner is always: score each reachable cell, pick best,
-#  move one step toward it.
+#  Unified baseline covering all risk configurations. The planner is
+#  always: score each reachable cell, pick best, move one step toward it.
 #
 #  Risk modes:
 #    RiskConstP         — quantile(Normal(μ,σ), p)
@@ -121,6 +120,9 @@ end
 
 # ─────────────────────────────────────────────────────────────────────
 #  Exploration bonus: expected σ reduction for an action
+#  Under the Bayesian model, the posterior std for a cell with prior σ_prior
+#  observed with obs_std is 1/sqrt(1/σ_prior² + 1/obs_std²).
+#  The gain is the expected reduction in mean-weighted std.
 # ─────────────────────────────────────────────────────────────────────
 
 function expected_sigma_mean_gain(
@@ -133,16 +135,20 @@ function expected_sigma_mean_gain(
     z_update::Int,
     transition_k::Float64
 )
+    # Exploration gain: sum of (σ_prior - σ_post) * mean over cone cells
+    # where σ_post < σ_prior
     nrows, ncols = size(grid_std)
     w = update_weight(sensed_alt, z_update, transition_k)
-    cone_radius = sensed_alt * tan(cone_angle)
     new_std = max(noise_sigma * (1.0 - w), 0.0)
+
+    cells = cone_cells(sensed_pos, sensed_alt, cone_angle, nrows, ncols)
     gain = 0.0
-    for i in 1:nrows, j in 1:ncols
-        dist = sqrt((i - sensed_pos[1])^2 + (j - sensed_pos[2])^2)
-        if dist <= cone_radius && new_std < grid_std[i, j]
-            gain += (grid_std[i, j] - new_std) * mean_grid[i, j]
+    for (i, j) in cells
+        σ_prior = grid_std[i, j]
+        if σ_prior <= 0.0 || new_std >= σ_prior
+            continue
         end
+        gain += (σ_prior - new_std) * mean_grid[i, j]
     end
     return gain
 end
@@ -163,8 +169,10 @@ function plan_greedy_risk(
     λ_travel::Float64 = 0.01,
     λ_explore::Float64 = 0.0,
     ts_rng::AbstractRNG = MersenneTwister(42),
+    obs_rng::AbstractRNG = MersenneTwister(0),
 )
     nrows, ncols = size(initial_mean_grid)
+    true_terrain = initial_mean_grid .+ update_grid
     mean_grid = copy(initial_mean_grid)
     grid_std  = fill(noise_sigma, nrows, ncols)
 
@@ -174,8 +182,8 @@ function plan_greedy_risk(
     while current_state[3] > 0
         i, j, z = current_state
 
-        update_with_cone!(grid_std, mean_grid, initial_mean_grid, update_grid,
-                          (i, j), z, noise_sigma, cone_angle, z_update, transition_k)
+        observe_and_update!(mean_grid, grid_std, true_terrain, initial_mean_grid,
+                            (i, j), z, noise_sigma, cone_angle, z_update, transition_k, obs_rng)
 
         reachable = reachable_indices(nrows, ncols, i, j, z)
 
@@ -211,8 +219,7 @@ function plan_greedy_risk(
         next_state = step_next_state(nrows, ncols, current_state, action)
 
         r = if next_state[3] == 0
-            true_val = initial_mean_grid[next_state[1], next_state[2]] +
-                       update_grid[next_state[1], next_state[2]]
+            true_val = true_terrain[next_state[1], next_state[2]]
             true_val + action_penalty(action)
         else
             action_penalty(action)
@@ -228,6 +235,6 @@ function plan_greedy_risk(
     end
 
     land_i, land_j, _ = trajectory[end].next_state
-    landing_value = initial_mean_grid[land_i, land_j] + update_grid[land_i, land_j]
+    landing_value = true_terrain[land_i, land_j]
     return trajectory, landing_value, grid_std, mean_grid
 end

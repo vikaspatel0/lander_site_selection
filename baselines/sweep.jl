@@ -38,6 +38,7 @@ end
 
 # ─────────────────────────────────────────────────────────────────────
 #  Build policy list (same as run_all.jl but parameterized)
+#  Each policy lambda takes 6 args: (img, ug, ns, ss, ca, obs_rng)
 # ─────────────────────────────────────────────────────────────────────
 
 function build_sweep_policies(; z_update::Int, transition_k::Float64,
@@ -46,11 +47,12 @@ function build_sweep_policies(; z_update::Int, transition_k::Float64,
     policies = Tuple{String, Function}[]
 
     function gr(name, rc; λe=0.0)
-        push!(policies, (name, (img, ug, ns, ss, ca) ->
+        push!(policies, (name, (img, ug, ns, ss, ca, obs_rng) ->
             plan_greedy_risk(img, ug, ns, ss, ca;
                 z_update=z_update, transition_k=transition_k,
                 risk_cfg=rc, λ_explore=λe,
-                ts_rng=MersenneTwister(rand(1:10^9)))))
+                ts_rng=MersenneTwister(rand(1:10^9)),
+                obs_rng=obs_rng)))
     end
 
     # --- Greedy-risk: Entropic-sigma variants ---
@@ -84,71 +86,83 @@ function build_sweep_policies(; z_update::Int, transition_k::Float64,
     # --- Tail lookahead: %ile (ConstP) × lambda_best ---
     for λb in [0.5, 1.0, 1.5]
         λb_str = @sprintf("%.1f", λb)
-        push!(policies, ("TL %ile λb=$λb_str", (img, ug, ns, ss, ca) ->
+        push!(policies, ("TL %ile λb=$λb_str", (img, ug, ns, ss, ca, obs_rng) ->
             plan_tail_lookahead(img, ug, ns, ss, ca;
                 z_update=z_update, transition_k=transition_k,
                 risk_cfg=TLRiskConfig(mode=TLRiskConstP, p_const=0.9),
                 tail_cfg=TailLookaheadConfig(tail_fraction=0.10, lambda_tail=0.025,
                     lambda_best=λb, lambda_travel=0.01, lambda_entropy=0.1,
-                    simulate_next_observation=true))))
+                    simulate_next_observation=true),
+                obs_rng=obs_rng)))
     end
 
     # --- Tail lookahead: mean × lambda_best ---
     for λb in [0.5, 1.0, 1.5]
         λb_str = @sprintf("%.1f", λb)
-        push!(policies, ("TL mean λb=$λb_str", (img, ug, ns, ss, ca) ->
+        push!(policies, ("TL mean λb=$λb_str", (img, ug, ns, ss, ca, obs_rng) ->
             plan_tail_lookahead(img, ug, ns, ss, ca;
                 z_update=z_update, transition_k=transition_k,
                 risk_cfg=TLRiskConfig(mode=TLRiskMean),
                 tail_cfg=TailLookaheadConfig(tail_fraction=0.10, lambda_tail=0.025,
                     lambda_best=λb, lambda_travel=0.01, lambda_entropy=0.1,
-                    simulate_next_observation=true))))
+                    simulate_next_observation=true),
+                obs_rng=obs_rng)))
     end
 
     # --- Tail lookahead: 80% tail × lambda_best ---
     for λb in [0.5, 1.0, 1.5]
         λb_str = @sprintf("%.1f", λb)
-        push!(policies, ("TL 80% λb=$λb_str", (img, ug, ns, ss, ca) ->
+        push!(policies, ("TL 80% λb=$λb_str", (img, ug, ns, ss, ca, obs_rng) ->
             plan_tail_lookahead(img, ug, ns, ss, ca;
                 z_update=z_update, transition_k=transition_k,
                 risk_cfg=TLRiskConfig(mode=TLRiskEntropicSigma, beta=0.5),
                 tail_cfg=TailLookaheadConfig(tail_fraction=0.80, lambda_tail=0.025,
                     lambda_best=λb, lambda_travel=0.01, lambda_entropy=0.1,
-                    simulate_next_observation=true))))
+                    simulate_next_observation=true),
+                obs_rng=obs_rng)))
     end
 
     # Bandit
-    push!(policies, ("UCB α=0.5", (img, ug, ns, ss, ca) ->
-        plan_ucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=0.5)))
-    push!(policies, ("UCB α=1.0", (img, ug, ns, ss, ca) ->
-        plan_ucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=1.0)))
-    push!(policies, ("LCB α=1.0", (img, ug, ns, ss, ca) ->
-        plan_lcb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=1.0)))
-    push!(policies, ("LUCB", (img, ug, ns, ss, ca) ->
-        plan_lucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=1.0, c=2.0)))
-    push!(policies, ("Thompson (ban)", (img, ug, ns, ss, ca) ->
+    push!(policies, ("UCB α=0.5", (img, ug, ns, ss, ca, obs_rng) ->
+        plan_ucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=0.5,
+                 obs_rng=obs_rng)))
+    push!(policies, ("UCB α=1.0", (img, ug, ns, ss, ca, obs_rng) ->
+        plan_ucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=1.0,
+                 obs_rng=obs_rng)))
+    push!(policies, ("LCB α=1.0", (img, ug, ns, ss, ca, obs_rng) ->
+        plan_lcb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=1.0,
+                 obs_rng=obs_rng)))
+    push!(policies, ("LUCB", (img, ug, ns, ss, ca, obs_rng) ->
+        plan_lucb(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k, α=1.0, c=2.0,
+                  obs_rng=obs_rng)))
+    push!(policies, ("Thompson (ban)", (img, ug, ns, ss, ca, obs_rng) ->
         plan_thompson(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
-                      ts_rng=MersenneTwister(rand(1:10^9)))))
+                      ts_rng=MersenneTwister(rand(1:10^9)),
+                      obs_rng=obs_rng)))
 
     # MCTS rollout
-    push!(policies, ("MCTS-ro greedy", (img, ug, ns, ss, ca) ->
+    push!(policies, ("MCTS-ro greedy", (img, ug, ns, ss, ca, obs_rng) ->
         plan_mcts_rollout(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                           n_rollouts=n_rollouts, rollout_policy=:greedy,
-                          sample_rng=MersenneTwister(rand(1:10^9)), budget=budget)))
-    push!(policies, ("MCTS-ro ucb", (img, ug, ns, ss, ca) ->
+                          sample_rng=MersenneTwister(rand(1:10^9)),
+                          obs_rng=obs_rng, budget=budget)))
+    push!(policies, ("MCTS-ro ucb", (img, ug, ns, ss, ca, obs_rng) ->
         plan_mcts_rollout(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                           n_rollouts=n_rollouts, rollout_policy=:ucb, rollout_alpha=1.0,
-                          sample_rng=MersenneTwister(rand(1:10^9)), budget=budget)))
+                          sample_rng=MersenneTwister(rand(1:10^9)),
+                          obs_rng=obs_rng, budget=budget)))
 
     # MCTS tree (greedy + ucb rollouts only — random is too weak)
-    push!(policies, ("MCTS-tree greedy", (img, ug, ns, ss, ca) ->
+    push!(policies, ("MCTS-tree greedy", (img, ug, ns, ss, ca, obs_rng) ->
         plan_mcts_tree(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                        mcts_cfg=MCTSTreeConfig(iterations=1500, rollout_policy=:greedy),
-                       rng=MersenneTwister(rand(1:10^9)), budget=budget)))
-    push!(policies, ("MCTS-tree ucb", (img, ug, ns, ss, ca) ->
+                       rng=MersenneTwister(rand(1:10^9)),
+                       obs_rng=obs_rng, budget=budget)))
+    push!(policies, ("MCTS-tree ucb", (img, ug, ns, ss, ca, obs_rng) ->
         plan_mcts_tree(img, ug, ns, ss, ca; z_update=z_update, transition_k=transition_k,
                        mcts_cfg=MCTSTreeConfig(iterations=1500, rollout_policy=:ucb, rollout_alpha=1.0),
-                       rng=MersenneTwister(rand(1:10^9)), budget=budget)))
+                       rng=MersenneTwister(rand(1:10^9)),
+                       obs_rng=obs_rng, budget=budget)))
 
     return policies
 end
@@ -211,9 +225,10 @@ function run_sweep(;
                 update_grid = noise_sigma .* randn(rng_noise, grid_size, grid_size)
 
                 for (pi, (_, plan_fn)) in enumerate(policies)
+                    obs_rng = MersenneTwister(noise_seed + pi)
                     _, landing_value, _, _ = plan_fn(
                         initial_mean_grid, update_grid, noise_sigma,
-                        start_state, cone_angle)
+                        start_state, cone_angle, obs_rng)
                     push!(results[pi], landing_value)
                 end
             end

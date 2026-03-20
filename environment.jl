@@ -4,18 +4,37 @@ const _ENV_LOADED = true
 # =====================================================================
 #  Shared environment for lander site selection baselines
 #
-#  Deterministic observation model:
-#    true_terrain = initial_mean_grid + update_grid
-#    At altitude z, the agent observes within a cone:
-#      w = update_weight(z, z_update, transition_k)
-#      mean_grid[i,j] = initial_mean_grid[i,j] + w * update_grid[i,j]
-#      grid_std[i,j]  = noise_sigma * (1 - w)
+#  Observation model (environment/agent separation):
+#
+#  ENVIRONMENT (has ground truth):
+#    true_terrain[i,j] = initial_mean_grid[i,j] + update_grid[i,j]
+#    At altitude z, cells in the cone produce sensor readings:
+#      obs_std = noise_sigma * (1 - w),  w = update_weight(z, ...)
+#      y[i,j] = true_terrain[i,j] + N(0, obs_std²)
+#    → generate_cone_observation(true_terrain, ...)
+#
+#  AGENT (no access to ground truth):
+#    Receives sensor readings y[i,j] and updates belief via
+#    Bayesian conjugate normal-normal update:
+#      τ_post = τ_prior + τ_obs
+#      μ_post = (τ_prior·μ_prior + τ_obs·y) / τ_post
+#    → bayesian_update!(mean_grid, grid_std, observations, obs_std)
 #
 #  All baselines include this file and build on these primitives.
 # =====================================================================
 
 using Distributions
 using Random
+
+# ─────────────────────────────────────────────────────────────────────
+#  Global update mode setting (togglable)
+#  :wholesale         — replace mean/std
+#  :bayesian          — conjugate normal-normal update
+#  :bayesian_decay    — Bayesian with exponential precision decay
+#  :altitude_weighted — Bayesian with altitude-informed blending
+# ─────────────────────────────────────────────────────────────────────
+GLOBAL_UPDATE_MODE = :altitude_weighted
+GLOBAL_DECAY_LAMBDA = 0.6
 using Statistics
 using DelimitedFiles
 
@@ -52,7 +71,6 @@ function generate_terrain_2(size::Int; seed=42, value_min=-10, value_range=20)
     terrain .+= 0.05 * randn(size, size)
 
     # Normalize the terrain to the desired range
-    # (This part of your code was good, no changes needed here)
     curr_min = minimum(terrain)
     curr_max = maximum(terrain)
     curr_range = curr_max - curr_min
@@ -129,7 +147,7 @@ end
 action_penalty(a::Symbol) = (a == :none) ? 0.0 : -0.01
 
 # ─────────────────────────────────────────────────────────────────────
-#  Cone sensing (deterministic observation model)
+#  Observation weight (shared by all observation models)
 # ─────────────────────────────────────────────────────────────────────
 
 function update_weight(z::Int, z_update::Int, transition_k::Float64)
@@ -148,6 +166,231 @@ function update_weight(z::Int, z_update::Int, transition_k::Float64)
     end
 end
 
+# ─────────────────────────────────────────────────────────────────────
+#  Cone geometry helper: returns indices of cells inside the cone
+# ─────────────────────────────────────────────────────────────────────
+
+function cone_cells(current_pos::Tuple{Int,Int}, altitude::Int,
+                    cone_angle::Float64, nrows::Int, ncols::Int)
+    i_curr, j_curr = current_pos
+    cone_radius = altitude * tan(cone_angle)
+    cells = Tuple{Int,Int}[]
+    r_int = Int(ceil(cone_radius))
+    for i in max(1, i_curr - r_int):min(nrows, i_curr + r_int)
+        for j in max(1, j_curr - r_int):min(ncols, j_curr + r_int)
+            if sqrt((i - i_curr)^2 + (j - j_curr)^2) <= cone_radius
+                push!(cells, (i, j))
+            end
+        end
+    end
+    return cells
+end
+
+# ─────────────────────────────────────────────────────────────────────
+#  ENVIRONMENT SIDE: generate sensor observations
+#
+#  These functions use the TRUE terrain to produce what the sensor
+#  would return. The agent never calls these directly — only the
+#  simulation loop does.
+# ─────────────────────────────────────────────────────────────────────
+
+"""
+    generate_cone_observation(true_terrain, initial_mean_grid, current_pos,
+                              altitude, noise_sigma, cone_angle, z_update,
+                              transition_k, rng)
+
+Environment-side function. Generates noisy sensor readings for all cells
+in the observation cone. Returns a Dict mapping (i,j) => observed_value.
+
+The observation model:
+  signal[i,j] = (1-w) * initial_mean[i,j] + w * true_terrain[i,j]
+  obs[i,j]    = signal[i,j] + obs_std * randn
+where obs_std = noise_sigma * (1 - w).
+
+At high altitude (w≈0): obs ≈ initial_mean + noise (uninformative)
+At low altitude (w≈1): obs ≈ true_terrain (precise)
+At altitude 0: obs = true_terrain exactly.
+"""
+function generate_cone_observation(
+    true_terrain::Matrix{Float64},
+    initial_mean_grid::Matrix{Float64},
+    current_pos::Tuple{Int,Int},
+    altitude::Int,
+    noise_sigma::Float64,
+    cone_angle::Float64,
+    z_update::Int,
+    transition_k::Float64,
+    rng::AbstractRNG
+)
+    nrows, ncols = size(true_terrain)
+    w = update_weight(altitude, z_update, transition_k)
+    obs_std = max(noise_sigma * (1.0 - w), 0.0)
+
+    observations = Dict{Tuple{Int,Int}, Float64}()
+
+    if altitude == 0
+        i, j = current_pos
+        observations[(i, j)] = true_terrain[i, j]
+    else
+        for (i, j) in cone_cells(current_pos, altitude, cone_angle, nrows, ncols)
+            signal = (1.0 - w) * initial_mean_grid[i, j] + w * true_terrain[i, j]
+            if obs_std > 0.0
+                observations[(i, j)] = signal + obs_std * randn(rng)
+            else
+                observations[(i, j)] = signal
+            end
+        end
+    end
+
+    return observations, obs_std
+end
+
+# ─────────────────────────────────────────────────────────────────────
+#  AGENT SIDE: Bayesian belief update from sensor observations
+#
+#  The agent receives raw sensor readings and updates its belief.
+#  It does NOT have access to the true terrain.
+# ─────────────────────────────────────────────────────────────────────
+
+"""
+    bayesian_update!(mean_grid, grid_std, observations, obs_std; mode)
+
+Agent-side function. Updates the belief (mean_grid, grid_std) given
+sensor observations.
+
+Modes:
+  :wholesale  — replace mean with obs, std with obs_std (if obs_std < σ_prior).
+  :bayesian   — Bayesian conjugate normal-normal update (accumulates information).
+  :bayesian_decay — Bayesian with exponential precision decay (lambda parameter).
+  :altitude_weighted — Bayesian with altitude-informed blending:
+                τ_post = (1-w)·τ_prior + w·τ_obs, where w = observation weight from altitude.
+                At high altitude (w≈0): trust prior, ignore observation.
+                At low altitude (w≈1): full Bayesian update.
+"""
+function bayesian_update!(
+    mean_grid::Matrix{Float64},
+    grid_std::Matrix{Float64},
+    observations::Dict{Tuple{Int,Int}, Float64},
+    obs_std::Float64;
+    mode::Symbol = :wholesale,
+    lambda::Float64 = 0.5,  # used for :bayesian_decay
+    obs_weight::Float64 = 1.0,  # used for :altitude_weighted (w from update_weight)
+)
+    for ((i, j), y) in observations
+        σ_prior = grid_std[i, j]
+        if σ_prior <= 0.0
+            continue  # already know this cell exactly
+        end
+
+        if obs_std <= 0.0
+            # exact observation (all modes agree)
+            mean_grid[i, j] = y
+            grid_std[i, j] = 0.0
+        elseif mode == :wholesale
+            if obs_std < σ_prior
+                mean_grid[i, j] = y
+                grid_std[i, j] = obs_std
+            end
+        elseif mode == :bayesian
+            τ_prior = 1.0 / (σ_prior^2)
+            τ_obs = 1.0 / (obs_std^2)
+            τ_post = τ_prior + τ_obs
+            mean_grid[i, j] = (τ_prior * mean_grid[i, j] + τ_obs * y) / τ_post
+            grid_std[i, j] = 1.0 / sqrt(τ_post)
+        elseif mode == :bayesian_decay
+            τ_prior = lambda / (σ_prior^2)
+            τ_obs = 1.0 / (obs_std^2)
+            τ_post = τ_prior + τ_obs
+            mean_grid[i, j] = (τ_prior * mean_grid[i, j] + τ_obs * y) / τ_post
+            grid_std[i, j] = 1.0 / sqrt(τ_post)
+        elseif mode == :altitude_weighted
+            w = obs_weight
+            τ_prior = 1.0 / (σ_prior^2)
+            τ_obs = 1.0 / (obs_std^2)
+            τ_post = (1.0 - w) * τ_prior + w * τ_obs
+            if τ_post > 0.0
+                mean_grid[i, j] = ((1.0 - w) * τ_prior * mean_grid[i, j] + w * τ_obs * y) / τ_post
+                grid_std[i, j] = 1.0 / sqrt(τ_post)
+            end
+        end
+    end
+    return nothing
+end
+
+# ─────────────────────────────────────────────────────────────────────
+#  SIMULATION CONVENIENCE: observe + update in one call
+# ─────────────────────────────────────────────────────────────────────
+
+"""
+    observe_and_update!(mean_grid, grid_std, true_terrain, initial_mean_grid,
+                        current_pos, altitude, noise_sigma, cone_angle,
+                        z_update, transition_k, rng)
+
+Convenience function for the simulation loop. Generates observations
+from the true terrain (environment side), then updates the agent's
+belief (agent side). Returns the observations dict.
+"""
+function observe_and_update!(
+    mean_grid::Matrix{Float64},
+    grid_std::Matrix{Float64},
+    true_terrain::Matrix{Float64},
+    initial_mean_grid::Matrix{Float64},
+    current_pos::Tuple{Int,Int},
+    altitude::Int,
+    noise_sigma::Float64,
+    cone_angle::Float64,
+    z_update::Int,
+    transition_k::Float64,
+    rng::AbstractRNG;
+    update_mode::Symbol = GLOBAL_UPDATE_MODE,
+    decay_lambda::Float64 = GLOBAL_DECAY_LAMBDA,
+)
+    if update_mode == :wholesale
+        # Inline wholesale update
+        # exactly, including RNG consumption pattern (only randn for improving cells)
+        i_curr, j_curr = current_pos
+        nrows, ncols = size(grid_std)
+        w = update_weight(altitude, z_update, transition_k)
+        cone_radius = altitude * tan(cone_angle)
+        new_std = max(noise_sigma * (1.0 - w), 0.0)
+
+        for i in 1:nrows, j in 1:ncols
+            dist = sqrt((i - i_curr)^2 + (j - j_curr)^2)
+            if dist <= cone_radius
+                if new_std < grid_std[i, j]
+                    grid_std[i, j] = new_std
+                    # Wholesale arithmetic: initial_mean + w * update_grid
+                    update_val = true_terrain[i, j] - initial_mean_grid[i, j]
+                    alt_obsv_mean = initial_mean_grid[i, j] + w * update_val
+                    mean_grid[i, j] = alt_obsv_mean + new_std * randn(rng)
+                end
+            end
+        end
+
+        if altitude == 0
+            grid_std[i_curr, j_curr] = 0.0
+            mean_grid[i_curr, j_curr] = true_terrain[i_curr, j_curr]
+        end
+
+        return nothing
+    else
+        # Bayesian modes: generate all observations then update
+        observations, obs_std = generate_cone_observation(
+            true_terrain, initial_mean_grid, current_pos, altitude, noise_sigma,
+            cone_angle, z_update, transition_k, rng)
+
+        w = update_weight(altitude, z_update, transition_k)
+        bayesian_update!(mean_grid, grid_std, observations, obs_std;
+                         mode=update_mode, lambda=decay_lambda, obs_weight=w)
+
+        return observations
+    end
+end
+
+# ─────────────────────────────────────────────────────────────────────
+#  LEGACY WRAPPERS (for backward compatibility)
+# ─────────────────────────────────────────────────────────────────────
+
 function update_with_cone!(
     grid_std::Matrix{Float64},
     mean_grid::Matrix{Float64},
@@ -162,11 +405,9 @@ function update_with_cone!(
 )
     i_curr, j_curr = current_pos
     nrows, ncols = size(grid_std)
-
     w = update_weight(altitude, z_update, transition_k)
     cone_radius = altitude * tan(cone_angle)
     new_std = max(noise_sigma * (1.0 - w), 0.0)
-
     for i in 1:nrows, j in 1:ncols
         dist = sqrt((i - i_curr)^2 + (j - j_curr)^2)
         if dist <= cone_radius
@@ -176,7 +417,6 @@ function update_with_cone!(
             end
         end
     end
-
     if altitude == 0
         grid_std[i_curr, j_curr] = 0.0
         mean_grid[i_curr, j_curr] = initial_mean_grid[i_curr, j_curr] + update_grid[i_curr, j_curr]
@@ -197,29 +437,9 @@ function update_with_cone_stochastic!(
     transition_k::Float64,
     rng::AbstractRNG
 )
-    i_curr, j_curr = current_pos
-    nrows, ncols = size(grid_std)
-
-    w = update_weight(altitude, z_update, transition_k)
-    cone_radius = altitude * tan(cone_angle)
-
-    new_std = max(noise_sigma * (1.0-w), 0.0)
-
-    for i in 1:nrows, j in 1:ncols
-        dist = sqrt((i - i_curr)^2 + (j - j_curr)^2)
-        if dist <= cone_radius
-            if new_std < grid_std[i, j]
-                grid_std[i, j] = new_std
-                alt_obsv_mean = initial_mean_grid[i, j] + w * update_grid[i, j]
-                mean_grid[i, j] = alt_obsv_mean + new_std * randn(rng)
-            end
-        end
-    end
-
-    if altitude == 0
-        grid_std[i_curr, j_curr] = 0.0
-        mean_grid[i_curr, j_curr] = initial_mean_grid[i_curr, j_curr] + update_grid[i_curr, j_curr]
-    end
+    true_terrain = initial_mean_grid .+ update_grid
+    observe_and_update!(mean_grid, grid_std, true_terrain, initial_mean_grid, current_pos,
+                        altitude, noise_sigma, cone_angle, z_update, transition_k, rng)
     return nothing
 end
 
@@ -234,11 +454,9 @@ function update_with_cone_std_only!(
 )
     i_curr, j_curr = current_pos
     nrows, ncols = size(grid_std)
-
     w = update_weight(altitude, z_update, transition_k)
     cone_radius = altitude * tan(cone_angle)
     new_std = max(noise_sigma * (1.0 - w), 0.0)
-
     for i in 1:nrows, j in 1:ncols
         dist = sqrt((i - i_curr)^2 + (j - j_curr)^2)
         if dist <= cone_radius && new_std < grid_std[i, j]
@@ -333,7 +551,7 @@ function greedy_fallback_action(mean_grid::Matrix{Float64},
     best_val  = -Inf
     for ii in max(1, i-z):min(nrows, i+z)
         di = abs(ii - i)
-        for jj in max(1, j-di):min(ncols, j+di)  # fix: should be j ± (z-di)
+        for jj in max(1, j-di):min(ncols, j+di)
             if abs(ii-i) + abs(jj-j) <= z && mean_grid[ii, jj] > best_val
                 best_val  = mean_grid[ii, jj]
                 best_cell = (ii, jj)

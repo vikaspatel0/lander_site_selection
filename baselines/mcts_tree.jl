@@ -1,8 +1,9 @@
 # =====================================================================
-#  Full MCTS Tree Search (from batch_run_large_mcts.jl)
+#  Full MCTS Tree Search
 #
 #  UCT-based tree search with random rollouts.
-#  Belief is std-only (mean stays fixed = initial_mean_grid).
+#  Belief std is updated using expected Bayesian posterior std
+#  (deterministic given prior std and obs_std).
 #  Landing reward sampled from N(μ, σ²) at terminal states.
 # =====================================================================
 
@@ -53,6 +54,51 @@ function sample_terminal_reward(
     return action_penalty(a) + landing
 end
 
+# ─────────────────────────────────────────────────────────────────────
+#  Bayesian expected std update for tree nodes
+#
+#  Given prior std σ_prior and obs_std, the expected posterior std is:
+#    σ_post = 1/sqrt(1/σ_prior² + 1/obs_std²)
+#  This is deterministic (does not depend on the actual observation value)
+#  and is the correct expected std reduction under the Bayesian model.
+# ─────────────────────────────────────────────────────────────────────
+
+function bayesian_std_update!(
+    grid_std::Matrix{Float64},
+    current_pos::Tuple{Int,Int},
+    altitude::Int,
+    noise_sigma::Float64,
+    cone_angle::Float64,
+    z_update::Int,
+    transition_k::Float64
+)
+    nrows, ncols = size(grid_std)
+    w = update_weight(altitude, z_update, transition_k)
+    obs_std = max(noise_sigma * (1.0 - w), 0.0)
+
+    if altitude == 0
+        i, j = current_pos
+        grid_std[i, j] = 0.0
+        return nothing
+    end
+
+    cells = cone_cells(current_pos, altitude, cone_angle, nrows, ncols)
+    for (i, j) in cells
+        σ_prior = grid_std[i, j]
+        if σ_prior <= 0.0
+            continue
+        end
+        if obs_std <= 0.0
+            grid_std[i, j] = 0.0
+        else
+            τ_prior = 1.0 / (σ_prior^2)
+            τ_obs = 1.0 / (obs_std^2)
+            grid_std[i, j] = 1.0 / sqrt(τ_prior + τ_obs)
+        end
+    end
+    return nothing
+end
+
 function edge_reward_and_child(
     parent::MCTSNode,
     a::Symbol,
@@ -74,8 +120,8 @@ function edge_reward_and_child(
 
     child_std = copy(parent.std_grid)
     if sp[3] > 0
-        update_with_cone_std_only!(child_std, (sp[1], sp[2]), sp[3],
-                                    noise_sigma, cone_angle, z_update, transition_k)
+        bayesian_std_update!(child_std, (sp[1], sp[2]), sp[3],
+                              noise_sigma, cone_angle, z_update, transition_k)
     end
 
     return r, sp, child_std
@@ -128,8 +174,8 @@ function rollout_return_random(
             total += sample_terminal_reward(mean_grid, std_grid, sp, a, rng)
         else
             total += action_penalty(a)
-            update_with_cone_std_only!(std_grid, (sp[1], sp[2]), sp[3],
-                                       noise_sigma, cone_angle, z_update, transition_k)
+            bayesian_std_update!(std_grid, (sp[1], sp[2]), sp[3],
+                                  noise_sigma, cone_angle, z_update, transition_k)
         end
 
         s = sp
@@ -177,8 +223,8 @@ function rollout_return_greedy(
             total += sample_terminal_reward(mean_grid, std_grid, sp, a, rng)
         else
             total += action_penalty(a)
-            update_with_cone_std_only!(std_grid, (sp[1], sp[2]), sp[3],
-                                       noise_sigma, cone_angle, z_update, transition_k)
+            bayesian_std_update!(std_grid, (sp[1], sp[2]), sp[3],
+                                  noise_sigma, cone_angle, z_update, transition_k)
         end
 
         s = sp
@@ -229,8 +275,8 @@ function rollout_return_ucb(
             total += sample_terminal_reward(mean_grid, std_grid, sp, a, rng)
         else
             total += action_penalty(a)
-            update_with_cone_std_only!(std_grid, (sp[1], sp[2]), sp[3],
-                                       noise_sigma, cone_angle, z_update, transition_k)
+            bayesian_std_update!(std_grid, (sp[1], sp[2]), sp[3],
+                                  noise_sigma, cone_angle, z_update, transition_k)
         end
 
         s = sp
@@ -367,10 +413,12 @@ function plan_mcts_tree(
     transition_k::Float64 = 0.0,
     mcts_cfg::MCTSTreeConfig = MCTSTreeConfig(),
     rng::AbstractRNG = Random.default_rng(),
+    obs_rng::AbstractRNG = MersenneTwister(0),
     budget::ActionBudget = DEFAULT_BUDGET,
 )
     nrows, ncols = size(initial_mean_grid)
-    mean_grid = copy(initial_mean_grid)   # mean stays fixed (MCTS doesn't use update_grid for belief)
+    true_terrain = initial_mean_grid .+ update_grid
+    mean_grid = copy(initial_mean_grid)
     grid_std = fill(noise_sigma, nrows, ncols)
 
     trajectory = TrajectoryStep[]
@@ -379,8 +427,9 @@ function plan_mcts_tree(
     while current_state[3] > 0
         i, j, z = current_state
 
-        update_with_cone_std_only!(grid_std, (i, j), z, noise_sigma, cone_angle,
-                                    z_update, transition_k)
+        # Real observation: Bayesian update from true terrain
+        observe_and_update!(mean_grid, grid_std, true_terrain, initial_mean_grid,
+                            (i, j), z, noise_sigma, cone_angle, z_update, transition_k, obs_rng)
 
         t_action = time()
         action = mcts_tree_best_action(
@@ -392,8 +441,7 @@ function plan_mcts_tree(
         next_state = step_next_state(nrows, ncols, current_state, action)
 
         r = if next_state[3] == 0
-            true_val = initial_mean_grid[next_state[1], next_state[2]] +
-                       update_grid[next_state[1], next_state[2]]
+            true_val = true_terrain[next_state[1], next_state[2]]
             true_val + action_penalty(action)
         else
             action_penalty(action)
@@ -409,6 +457,6 @@ function plan_mcts_tree(
     end
 
     land_i, land_j, _ = trajectory[end].next_state
-    landing_value = initial_mean_grid[land_i, land_j] + update_grid[land_i, land_j]
+    landing_value = true_terrain[land_i, land_j]
     return trajectory, landing_value, grid_std, mean_grid
 end

@@ -2,10 +2,12 @@
 #  MCTS Depth-1 with Monte Carlo Rollouts
 #
 #  At each step:
-#    1. Update belief via cone observation
+#    1. Update belief via cone observation (new Bayesian model)
 #    2. For each of 5 actions, run n_rollouts:
 #       a. Sample terrain from current belief N(μ, σ²)
 #       b. Simulate continuation with chosen rollout policy
+#          using generate_cone_observation + bayesian_update!
+#          on the SAMPLED terrain as the hypothetical truth
 #    3. Take action with highest average landing value
 #
 #  Rollout policies: :greedy (best μ), :ucb (μ + α·σ), :coneinfo (μ + α·Σσ_cone)
@@ -14,27 +16,26 @@
 # Requires: environment.jl loaded first
 
 # ─────────────────────────────────────────────────────────────────────
-#  Rollout policies (operate on sampled terrain with simulated sensing)
+#  Rollout policies (operate on sampled terrain with Bayesian sensing)
 # ─────────────────────────────────────────────────────────────────────
 
 function rollout_greedy(
     sampled_terrain::Matrix{Float64},
-    initial_mean_grid::Matrix{Float64},
-    update_grid_sampled::Matrix{Float64},
     mean_grid::Matrix{Float64},
     grid_std::Matrix{Float64},
     ni::Int, nj::Int, z_next::Int,
     noise_sigma::Float64, cone_angle::Float64,
     z_update::Int, transition_k::Float64,
-    nrows::Int, ncols::Int
+    nrows::Int, ncols::Int,
+    rollout_rng::AbstractRNG
 )
     sim_mean = copy(mean_grid)
     sim_std  = copy(grid_std)
 
     si, sj, sz = ni, nj, z_next
     while sz > 0
-        update_with_cone!(sim_std, sim_mean, initial_mean_grid, update_grid_sampled,
-                          (si, sj), sz, noise_sigma, cone_angle, z_update, transition_k)
+        observe_and_update!(sim_mean, sim_std, sampled_terrain, mean_grid,
+                            (si, sj), sz, noise_sigma, cone_angle, z_update, transition_k, rollout_rng)
 
         best_ri, best_rj = si, sj
         best_v = -Inf
@@ -56,14 +57,13 @@ end
 
 function rollout_ucb(
     sampled_terrain::Matrix{Float64},
-    initial_mean_grid::Matrix{Float64},
-    update_grid_sampled::Matrix{Float64},
     mean_grid::Matrix{Float64},
     grid_std::Matrix{Float64},
     ni::Int, nj::Int, z_next::Int,
     noise_sigma::Float64, cone_angle::Float64,
     z_update::Int, transition_k::Float64,
-    nrows::Int, ncols::Int;
+    nrows::Int, ncols::Int,
+    rollout_rng::AbstractRNG;
     alpha::Float64 = 1.0
 )
     sim_mean = copy(mean_grid)
@@ -71,8 +71,8 @@ function rollout_ucb(
 
     si, sj, sz = ni, nj, z_next
     while sz > 0
-        update_with_cone!(sim_std, sim_mean, initial_mean_grid, update_grid_sampled,
-                          (si, sj), sz, noise_sigma, cone_angle, z_update, transition_k)
+        observe_and_update!(sim_mean, sim_std, sampled_terrain, mean_grid,
+                            (si, sj), sz, noise_sigma, cone_angle, z_update, transition_k, rollout_rng)
 
         best_ri, best_rj = si, sj
         best_v = -Inf
@@ -97,14 +97,13 @@ end
 
 function rollout_coneinfo(
     sampled_terrain::Matrix{Float64},
-    initial_mean_grid::Matrix{Float64},
-    update_grid_sampled::Matrix{Float64},
     mean_grid::Matrix{Float64},
     grid_std::Matrix{Float64},
     ni::Int, nj::Int, z_next::Int,
     noise_sigma::Float64, cone_angle::Float64,
     z_update::Int, transition_k::Float64,
-    nrows::Int, ncols::Int;
+    nrows::Int, ncols::Int,
+    rollout_rng::AbstractRNG;
     alpha::Float64 = 1.0
 )
     sim_mean = copy(mean_grid)
@@ -112,8 +111,8 @@ function rollout_coneinfo(
 
     si, sj, sz = ni, nj, z_next
     while sz > 0
-        update_with_cone!(sim_std, sim_mean, initial_mean_grid, update_grid_sampled,
-                          (si, sj), sz, noise_sigma, cone_angle, z_update, transition_k)
+        observe_and_update!(sim_mean, sim_std, sampled_terrain, mean_grid,
+                            (si, sj), sz, noise_sigma, cone_angle, z_update, transition_k, rollout_rng)
 
         best_act = :none
         best_score = -Inf
@@ -167,23 +166,24 @@ function plan_mcts_rollout(
     rollout_policy::Symbol = :greedy,
     rollout_alpha::Float64 = 1.0,
     sample_rng::AbstractRNG = Random.GLOBAL_RNG,
+    obs_rng::AbstractRNG = MersenneTwister(0),
     budget::ActionBudget = DEFAULT_BUDGET,
 )
     nrows, ncols = size(initial_mean_grid)
+    true_terrain = initial_mean_grid .+ update_grid
     mean_grid = copy(initial_mean_grid)
     grid_std  = fill(noise_sigma, nrows, ncols)
 
     trajectory = TrajectoryStep[]
     current_state = start_state
     sampled_terrain = Matrix{Float64}(undef, nrows, ncols)
-    sampled_update  = Matrix{Float64}(undef, nrows, ncols)
 
     while current_state[3] > 0
         i, j, z = current_state
 
-        # 1. Real observation
-        update_with_cone!(grid_std, mean_grid, initial_mean_grid, update_grid,
-                          (i, j), z, noise_sigma, cone_angle, z_update, transition_k)
+        # 1. Real observation (Bayesian update from true terrain)
+        observe_and_update!(mean_grid, grid_std, true_terrain, initial_mean_grid,
+                            (i, j), z, noise_sigma, cone_angle, z_update, transition_k, obs_rng)
 
         z_next = z - 1
 
@@ -199,7 +199,7 @@ function plan_mcts_rollout(
                 end
             end
             ni, nj = apply_action(i, j, best_act, nrows, ncols)
-            true_val = initial_mean_grid[ni, nj] + update_grid[ni, nj]
+            true_val = true_terrain[ni, nj]
             r = true_val + action_penalty(best_act)
             push!(trajectory, (state=current_state, action=best_act, reward=r,
                                next_state=(ni,nj,0),
@@ -228,29 +228,28 @@ function plan_mcts_rollout(
                 # Sample terrain from current belief
                 for ci in 1:nrows, cj in 1:ncols
                     sampled_terrain[ci, cj] = mean_grid[ci, cj] + grid_std[ci, cj] * randn(sample_rng)
-                    sampled_update[ci, cj]  = sampled_terrain[ci, cj] - initial_mean_grid[ci, cj]
                 end
+
+                # Each rollout gets its own RNG for observation noise
+                rollout_rng = MersenneTwister(rand(sample_rng, UInt64))
 
                 if rollout_policy == :ucb
                     action_values[ai] += rollout_ucb(
-                        sampled_terrain, initial_mean_grid, sampled_update,
-                        mean_grid, grid_std,
+                        sampled_terrain, mean_grid, grid_std,
                         ni, nj, z_next, noise_sigma, cone_angle,
-                        z_update, transition_k, nrows, ncols;
+                        z_update, transition_k, nrows, ncols, rollout_rng;
                         alpha=rollout_alpha)
                 elseif rollout_policy == :coneinfo
                     action_values[ai] += rollout_coneinfo(
-                        sampled_terrain, initial_mean_grid, sampled_update,
-                        mean_grid, grid_std,
+                        sampled_terrain, mean_grid, grid_std,
                         ni, nj, z_next, noise_sigma, cone_angle,
-                        z_update, transition_k, nrows, ncols;
+                        z_update, transition_k, nrows, ncols, rollout_rng;
                         alpha=rollout_alpha)
                 else  # :greedy
                     action_values[ai] += rollout_greedy(
-                        sampled_terrain, initial_mean_grid, sampled_update,
-                        mean_grid, grid_std,
+                        sampled_terrain, mean_grid, grid_std,
                         ni, nj, z_next, noise_sigma, cone_angle,
-                        z_update, transition_k, nrows, ncols)
+                        z_update, transition_k, nrows, ncols, rollout_rng)
                 end
                 action_counts[ai] += 1
             end
@@ -273,7 +272,7 @@ function plan_mcts_rollout(
         ni, nj = apply_action(i, j, best_act, nrows, ncols)
 
         r = if z_next == 0
-            true_val = initial_mean_grid[ni, nj] + update_grid[ni, nj]
+            true_val = true_terrain[ni, nj]
             true_val + action_penalty(best_act)
         else
             action_penalty(best_act)
@@ -289,6 +288,6 @@ function plan_mcts_rollout(
     end
 
     land_i, land_j, _ = trajectory[end].next_state
-    landing_value = initial_mean_grid[land_i, land_j] + update_grid[land_i, land_j]
+    landing_value = true_terrain[land_i, land_j]
     return trajectory, landing_value, grid_std, mean_grid
 end
