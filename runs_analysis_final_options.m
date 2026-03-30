@@ -4,7 +4,11 @@ clc; clear; close all;
 %  USER SETTINGS (parallel)
 % =============================
 
-plot_type = "heatmap"; %"heatmap", "scatter_per_regime", "scatter_all_regimes", "first_two", "all"
+plot_type = "heatmap_single_regime"; %"heatmap", "heatmap_single_regime", "scatter_per_regime", "scatter_all_regimes", "first_two", "first_three", "all"
+
+% Pick one regime to show (must match your Results.reward_transition / Results.sigma values)
+pick_k    = "k15";
+pick_sigma = "5_0";
 
 %{
 strats = [..."max_perc", "min_perc", "mean_perc", "cellwise_perc",...
@@ -35,10 +39,10 @@ strats = ["max_perc", "cellwise_perc",...
           ];
 
 strats_names = ["Max \sigma", "C-wise \sigma",...
-                "Mean Targetting",...
+                "Mean Targeting",...
                 "CVaR \alpha 0.80",...
                 "Max \sigma expl", "C-wise \sigma expl",...
-                "Mean Targetting expl",...
+                "Mean Targeting expl",...
                 "CVaR \alpha 0.25 expl",...
                 ];
 %}
@@ -109,17 +113,22 @@ end
 %  HEATMAPS: 9 regimes
 %  (one subplot per regime)
 % =============================
-if (plot_type == "heatmap") || (plot_type == "first_two") || (plot_type == "all")
+if (plot_type == "heatmap") || (plot_type == "first_two") || (plot_type == "first_three") || (plot_type == "all")
     make_heatmap_grid(Results, strats, strats_names, reward_transition, reward_transition_names, sigma, sigma_names, "CE");
     make_heatmap_grid(Results, strats, strats_names, reward_transition, reward_transition_names, sigma, sigma_names, "P01");
     make_heatmap_grid(Results, strats, strats_names, reward_transition, reward_transition_names, sigma, sigma_names, "Mean");
+end
+
+if (plot_type == "heatmap_single_regime") || (plot_type == "first_two") || (plot_type == "first_three") || (plot_type == "all")
+    make_heatmap_three_metrics_single_regime(Results, strats, strats_names, ...
+        pick_k, pick_sigma, "Mean", "P01", "CE", beta);
 end
 
 % =============================
 %  SCATTER: mean vs P01 / CE
 %  Option A: one figure per regime (9 figures)
 % =============================
-if (plot_type == "scatter_per_regime") || (plot_type == "first_two") || (plot_type == "all")
+if (plot_type == "scatter_per_regime") || (plot_type == "first_three") || (plot_type == "all")
     plot_scatter_per_regime(Results, strats, strats_names, reward_transition, reward_transition_names, sigma, sigma_names, "P01");
     plot_scatter_per_regime(Results, strats, strats_names, reward_transition, reward_transition_names, sigma, sigma_names, "CE");
 end
@@ -251,4 +260,68 @@ function plot_scatter_all_regimes(Results, strats, strats_names, reward_transiti
         end
     end
     legend('Location','bestoutside');
+end
+
+function make_heatmap_three_metrics_single_regime(Results, strats, strats_names, ...
+        pick_k, pick_sigma, field1, field2, field3, beta)
+
+    fields = [string(field1), string(field2), string(field3)];
+    titles = strings(1,3);
+    for i = 1:3
+        switch fields(i)
+            case "Mean"
+                titles(i) = "Mean";
+            case "P01"
+                titles(i) = "1st %ile";
+            case "CE"
+                titles(i) = sprintf("CE, \\beta=%.3g", beta);
+            otherwise
+                titles(i) = fields(i);
+        end
+    end
+
+    fig = figure('Color','w');
+    t = tiledlayout(fig, 1, 3, 'TileSpacing','compact', 'Padding','compact');
+    title(t, sprintf("Regime: %s, \\sigma=%s", pick_k, pick_sigma), 'Interpreter','tex');
+
+    sub = Results(Results.reward_transition == pick_k & Results.sigma == pick_sigma, :);
+
+    for fi = 1:3
+        field = fields(fi);
+
+        % Build vector over strategies
+        M = nan(numel(strats), 1);
+        for a = 1:numel(strats)
+            row = sub(sub.strat == strats(a), :);
+            if ~isempty(row)
+                M(a,1) = row.(field)(1);
+            end
+        end
+
+        ax = nexttile(t, fi);
+        imagesc(ax, M);
+        colormap(ax, parula);
+        axis(ax, 'tight');
+
+        % Separate color scaling PER COLUMN (metric)
+        clim = [min(M, [], 'omitnan'), max(M, [], 'omitnan')];
+        if any(isnan(clim)) || clim(1) == clim(2)
+            clim = clim + [-1, 1]; % avoid degenerate CLim
+        end
+        set(ax, 'CLim', clim);
+
+        set(ax, 'YTick', 1:numel(strats), 'YTickLabel', strats_names, 'TickLabelInterpreter','tex');
+        set(ax, 'XTick', 1, 'XTickLabel', {''});
+
+        title(ax, titles(fi), 'Interpreter','tex');
+
+        for r = 1:numel(M)
+            if ~isnan(M(r))
+                text(ax, 1, r, sprintf('%.3g', M(r)), ...
+                    'HorizontalAlignment','center', 'Color','w', 'FontSize',8);
+            end
+        end
+
+        colorbar(ax); % one colorbar per metric/column
+    end
 end
