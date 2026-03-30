@@ -42,7 +42,18 @@ using DelimitedFiles
 #  Constants
 # ─────────────────────────────────────────────────────────────────────
 
-const ACTIONS = [:up, :down, :left, :right, :none]
+# Movement mode: :standard (5 actions, 1 cell) or :extended (9 actions, 1 or 2 cells)
+GLOBAL_MOVEMENT_MODE = :standard
+
+const ACTIONS_STANDARD = [:up, :down, :left, :right, :none]
+const ACTIONS_EXTENDED = [:up, :down, :left, :right, :up2, :down2, :left2, :right2, :none]
+
+ACTIONS = ACTIONS_STANDARD
+
+function set_movement_mode!(mode::Symbol)
+    global GLOBAL_MOVEMENT_MODE = mode
+    global ACTIONS = mode == :extended ? ACTIONS_EXTENDED : ACTIONS_STANDARD
+end
 
 # ─────────────────────────────────────────────────────────────────────
 #  Terrain generation
@@ -96,25 +107,28 @@ manhattan(a::Tuple{Int,Int}, b::Tuple{Int,Int}) = abs(a[1]-b[1]) + abs(a[2]-b[2]
 function step_next_state(nrows::Int, ncols::Int, s::Tuple{Int,Int,Int}, a::Symbol)
     i, j, z = s
     z_next = max(z - 1, 0)
-    if a == :up
-        return (max(i-1, 1), j, z_next)
-    elseif a == :down
-        return (min(i+1, nrows), j, z_next)
-    elseif a == :left
-        return (i, max(j-1, 1), z_next)
-    elseif a == :right
-        return (i, min(j+1, ncols), z_next)
-    else
-        return (i, j, z_next)
+    if a == :up;       return (max(i-1, 1), j, z_next)
+    elseif a == :down;  return (min(i+1, nrows), j, z_next)
+    elseif a == :left;  return (i, max(j-1, 1), z_next)
+    elseif a == :right; return (i, min(j+1, ncols), z_next)
+    elseif a == :up2;   return (max(i-2, 1), j, z_next)
+    elseif a == :down2; return (min(i+2, nrows), j, z_next)
+    elseif a == :left2; return (i, max(j-2, 1), z_next)
+    elseif a == :right2;return (i, min(j+2, ncols), z_next)
+    else;              return (i, j, z_next)
     end
 end
 
 function apply_action(i::Int, j::Int, a::Symbol, nrows::Int, ncols::Int)
-    if a == :up;     return (max(i-1,1), j)
+    if a == :up;       return (max(i-1,1), j)
     elseif a == :down;  return (min(i+1,nrows), j)
     elseif a == :left;  return (i, max(j-1,1))
     elseif a == :right; return (i, min(j+1,ncols))
-    else; return (i, j)
+    elseif a == :up2;   return (max(i-2,1), j)
+    elseif a == :down2; return (min(i+2,nrows), j)
+    elseif a == :left2; return (i, max(j-2,1))
+    elseif a == :right2;return (i, min(j+2,ncols))
+    else;              return (i, j)
     end
 end
 
@@ -123,20 +137,33 @@ function greedy_step_toward(pos::Tuple{Int,Int}, target::Tuple{Int,Int})
     ti, tj = target
     di = ti - i
     dj = tj - j
-    if abs(di) >= abs(dj) && di != 0
-        return di > 0 ? :down : :up
-    elseif dj != 0
-        return dj > 0 ? :right : :left
+    if GLOBAL_MOVEMENT_MODE == :extended
+        # Prefer 2-cell moves when distance >= 2
+        if abs(di) >= abs(dj) && di != 0
+            return abs(di) >= 2 ? (di > 0 ? :down2 : :up2) : (di > 0 ? :down : :up)
+        elseif dj != 0
+            return abs(dj) >= 2 ? (dj > 0 ? :right2 : :left2) : (dj > 0 ? :right : :left)
+        else
+            return :none
+        end
     else
-        return :none
+        if abs(di) >= abs(dj) && di != 0
+            return di > 0 ? :down : :up
+        elseif dj != 0
+            return dj > 0 ? :right : :left
+        else
+            return :none
+        end
     end
 end
 
 function reachable_indices(nrows::Int, ncols::Int, i::Int, j::Int, steps::Int)
+    # With extended movement (2 cells/step), max Manhattan distance = 2*steps
+    max_dist = GLOBAL_MOVEMENT_MODE == :extended ? 2 * steps : steps
     inds = Tuple{Int,Int}[]
-    for ii in max(1, i-steps):min(nrows, i+steps)
+    for ii in max(1, i-max_dist):min(nrows, i+max_dist)
         di = abs(ii - i)
-        hr = steps - di
+        hr = max_dist - di
         for jj in max(1, j-hr):min(ncols, j+hr)
             push!(inds, (ii, jj))
         end
@@ -345,9 +372,8 @@ function observe_and_update!(
     update_mode::Symbol = GLOBAL_UPDATE_MODE,
     decay_lambda::Float64 = GLOBAL_DECAY_LAMBDA,
 )
-    if update_mode == :wholesale
-        # Inline wholesale update
-        # exactly, including RNG consumption pattern (only randn for improving cells)
+    if update_mode == :deterministic
+        # Deterministic observation: no noise, exact up to weight w
         i_curr, j_curr = current_pos
         nrows, ncols = size(grid_std)
         w = update_weight(altitude, z_update, transition_k)
@@ -359,7 +385,31 @@ function observe_and_update!(
             if dist <= cone_radius
                 if new_std < grid_std[i, j]
                     grid_std[i, j] = new_std
-                    # Wholesale arithmetic: initial_mean + w * update_grid
+                    update_val = true_terrain[i, j] - initial_mean_grid[i, j]
+                    mean_grid[i, j] = initial_mean_grid[i, j] + w * update_val
+                end
+            end
+        end
+
+        if altitude == 0
+            grid_std[i_curr, j_curr] = 0.0
+            mean_grid[i_curr, j_curr] = true_terrain[i_curr, j_curr]
+        end
+
+        return nothing
+    elseif update_mode == :wholesale
+        # Stochastic wholesale update (matches batch_run RNG consumption)
+        i_curr, j_curr = current_pos
+        nrows, ncols = size(grid_std)
+        w = update_weight(altitude, z_update, transition_k)
+        cone_radius = altitude * tan(cone_angle)
+        new_std = max(noise_sigma * (1.0 - w), 0.0)
+
+        for i in 1:nrows, j in 1:ncols
+            dist = sqrt((i - i_curr)^2 + (j - j_curr)^2)
+            if dist <= cone_radius
+                if new_std < grid_std[i, j]
+                    grid_std[i, j] = new_std
                     update_val = true_terrain[i, j] - initial_mean_grid[i, j]
                     alt_obsv_mean = initial_mean_grid[i, j] + w * update_val
                     mean_grid[i, j] = alt_obsv_mean + new_std * randn(rng)

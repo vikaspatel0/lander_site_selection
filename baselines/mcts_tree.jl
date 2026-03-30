@@ -14,8 +14,8 @@
 # ─────────────────────────────────────────────────────────────────────
 
 Base.@kwdef struct MCTSTreeConfig
-    iterations::Int = 1500
-    exploration_c::Float64 = 1.4
+    iterations::Int = 700
+    exploration_c::Float64 = 3.0
     max_rollout_steps::Int = 10_000
     use_max_child_value::Bool = true
     rollout_policy::Symbol = :random   # :random, :greedy, :ucb
